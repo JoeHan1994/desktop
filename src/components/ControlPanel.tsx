@@ -71,7 +71,7 @@ export function ControlPanel({
         </div>
 
         {/* 语义检索输入 */}
-        <div className="flex items-center gap-2 rounded-2xl border border-white/15 bg-black/25 px-3 py-2.5 transition-colors focus-within:border-white/40 focus-within:ring-1 focus-within:ring-white/25">
+        <div className="glass glass-input flex items-center gap-2 rounded-2xl px-3 py-2.5">
           <svg
             className="h-4 w-4 shrink-0 text-white/40"
             viewBox="0 0 24 24"
@@ -102,7 +102,7 @@ export function ControlPanel({
           ].map((s) => (
             <div
               key={s.label}
-              className="rounded-2xl border border-white/10 bg-white/5 px-3 py-2.5 text-center"
+              className="glass glass-control rounded-2xl px-3 py-2.5 text-center"
             >
               <div className="truncate text-base font-semibold text-white">{s.value}</div>
               <div className="mt-0.5 text-[11px] text-white/45">{s.label}</div>
@@ -117,10 +117,7 @@ export function ControlPanel({
           disabled={busy}
           whileHover={{ scale: busy ? 1 : 1.02 }}
           whileTap={{ scale: busy ? 1 : 0.98 }}
-          className="mt-5 flex w-full items-center justify-center gap-2 rounded-2xl
-            border border-white/20 bg-white/90 px-4 py-2.5 text-sm font-semibold
-            text-neutral-900 shadow-lg shadow-black/30 transition-colors
-            hover:bg-white disabled:opacity-60"
+          className="glass glass-button glass-control mt-5 w-full rounded-2xl px-4 py-2.5 text-sm font-semibold text-white disabled:opacity-60"
         >
           {busy ? '检索中…' : '开始检索'}
         </motion.button>
@@ -134,11 +131,11 @@ export function ControlPanel({
             {results.map((r) => (
               <div
                 key={r.id}
-                className="rounded-xl border border-white/10 bg-white/5 px-3 py-2"
+                className="glass glass-control rounded-xl px-3 py-2"
               >
                 <div className="mb-1 flex items-center justify-between gap-2">
                   <span className="truncate text-[11px] text-white/50">{r.source}</span>
-                  <span className="shrink-0 rounded-md bg-sky-500/20 px-1.5 py-0.5 font-mono text-[10px] text-sky-300">
+                  <span className="glass glass-chip shrink-0 rounded-md px-1.5 py-0.5 font-mono text-[10px] text-sky-300">
                     {(r.score * 100).toFixed(1)}%
                   </span>
                 </div>

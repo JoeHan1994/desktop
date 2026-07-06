@@ -205,7 +205,7 @@ function Scene() {
  */
 export function PointCloudView() {
   return (
-    <div className="relative h-full w-full overflow-hidden rounded-2xl border border-white/10 bg-black/40">
+    <div className="glass glass-control relative h-full w-full overflow-hidden rounded-2xl">
       <Canvas
         camera={{ position: [0, 0, 13], fov: 50 }}
         dpr={[1, 2]}

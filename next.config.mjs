@@ -2,6 +2,8 @@
 const nextConfig = {
   // 静态导出（SSG），以适配 Tauri 的本地加载机制
   output: 'export',
+  // Tauri / file:// 环境没有站点根路径，生产静态资源需使用相对路径
+  assetPrefix: process.env.NODE_ENV === 'production' ? './' : undefined,
   // Tauri 使用本地文件协议，需要禁用图片优化
   images: {
     unoptimized: true,

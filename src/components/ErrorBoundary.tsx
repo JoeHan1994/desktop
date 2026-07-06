@@ -32,7 +32,7 @@ export class ErrorBoundary extends React.Component<
     if (this.state.error) {
       return (
         <div className="flex h-screen w-screen flex-col items-center justify-center gap-4 bg-[#04060c] px-8 text-center">
-          <div className="flex h-12 w-12 items-center justify-center rounded-2xl border border-rose-500/30 bg-rose-500/10">
+          <div className="glass glass-control flex h-12 w-12 items-center justify-center rounded-2xl border-rose-500/30 bg-rose-500/10">
             <svg
               viewBox="0 0 24 24"
               className="h-6 w-6 text-rose-400"
@@ -54,7 +54,7 @@ export class ErrorBoundary extends React.Component<
           </div>
           <button
             onClick={() => this.setState({ error: null })}
-            className="rounded-xl border border-white/12 px-4 py-1.5 text-xs text-white/50 transition-colors hover:bg-white/[0.06] hover:text-white/80"
+            className="glass glass-button glass-control rounded-xl px-4 py-1.5 text-xs"
           >
             重试
           </button>

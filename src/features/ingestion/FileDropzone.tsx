@@ -80,11 +80,11 @@ export function FileDropzone({ className = '' }: { className?: string }) {
         onKeyDown={(e) =>
           (e.key === 'Enter' || e.key === ' ') && inputRef.current?.click()
         }
-        className={`flex cursor-pointer flex-col items-center justify-center gap-3 rounded-2xl border-2 border-dashed px-6 py-10 text-center transition-colors
+        className={`glass glass-control flex cursor-pointer flex-col items-center justify-center gap-3 rounded-2xl border-2 border-dashed px-6 py-10 text-center
           ${
             dragOver
-              ? 'border-white/50 bg-white/10'
-              : 'border-white/15 bg-black/20 hover:border-white/25'
+              ? 'border-white/50'
+              : 'border-white/15 hover:border-white/25'
           }`}
       >
         <svg
@@ -132,9 +132,9 @@ export function FileDropzone({ className = '' }: { className?: string }) {
             {files.map((f, i) => (
               <div
                 key={`${f.name}-${i}`}
-                className="flex items-center gap-3 rounded-xl border border-white/10 bg-white/5 px-3 py-2"
+                className="glass glass-control flex items-center gap-3 rounded-xl px-3 py-2"
               >
-                <span className="rounded-md bg-white/10 px-1.5 py-0.5 text-[10px] font-medium text-white/60">
+                <span className="glass glass-chip rounded-md px-1.5 py-0.5 text-[10px] font-medium text-white/60">
                   {f.type}
                 </span>
                 <span className="flex-1 truncate text-sm text-white/80">
@@ -153,10 +153,10 @@ export function FileDropzone({ className = '' }: { className?: string }) {
               type="button"
               onClick={handleStartPipeline}
               disabled={processing}
-              className={`mt-3 w-full rounded-2xl border px-4 py-2 text-sm font-semibold transition-colors
+              className={`glass glass-button glass-control mt-3 w-full rounded-2xl px-4 py-2 text-sm font-semibold
                 ${done
-                  ? 'border-emerald-400/30 bg-emerald-400/15 text-emerald-300'
-                  : 'border-white/20 bg-white/10 text-white hover:bg-white/15 disabled:opacity-50'
+                  ? 'border-emerald-400/30 text-emerald-300'
+                  : 'text-white disabled:opacity-50'
                 }`}
             >
               {processing ? '流水线运行中…' : done ? '✓ 处理完成' : '开始处理'}

@@ -35,13 +35,13 @@ export function PipelineStepper({ active = 5 }: { active?: number }) {
                 initial={{ scale: 0.6, opacity: 0 }}
                 animate={{ scale: 1, opacity: 1 }}
                 transition={{ delay: i * 0.08, type: 'spring', stiffness: 200 }}
-                className={`flex h-9 w-9 items-center justify-center rounded-full border text-sm font-semibold
+                className={`glass glass-control flex h-9 w-9 items-center justify-center rounded-full text-sm font-semibold
                   ${
                     current
-                      ? 'border-white/30 bg-white text-neutral-900 shadow-lg shadow-black/30'
+                      ? 'border-white/30 text-white shadow-lg shadow-black/30'
                       : done
-                        ? 'border-white/20 bg-white/15 text-white/80'
-                        : 'border-white/12 bg-white/5 text-white/40'
+                        ? 'border-white/20 text-white/80'
+                        : 'border-white/12 text-white/40'
                   }`}
               >
                 {stage.id}

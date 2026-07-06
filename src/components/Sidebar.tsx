@@ -31,24 +31,19 @@ export function Sidebar({ active, onSelect }: SidebarProps) {
                 title={item.label}
                 whileHover={{ scale: 1.12 }}
                 whileTap={{ scale: 0.9 }}
-                className={`relative flex h-10 w-10 items-center justify-center rounded-full transition-colors
+                className={`glass glass-icon-button glass-control relative h-10 w-10 rounded-full
                   ${
                     isActive
                       ? 'text-white'
                       : 'text-white/40 hover:text-white/75'
                   }`}
                 style={{
-                  background: isActive
-                    ? 'rgb(var(--glass-rgb) / 0.16)'
-                    : 'rgb(255 255 255 / 0.05)',
                   border: isActive
                     ? '1px solid rgb(var(--accent-rgb) / 0.5)'
-                    : '1px solid rgb(255 255 255 / 0.08)',
-                  backdropFilter: 'blur(16px) saturate(1.4)',
-                  WebkitBackdropFilter: 'blur(16px) saturate(1.4)',
+                    : undefined,
                   boxShadow: isActive
                     ? '0 0 16px rgb(var(--accent-rgb) / 0.28), inset 0 1px 0 rgb(255 255 255 / 0.1)'
-                    : 'inset 0 1px 0 rgb(255 255 255 / 0.06)',
+                    : undefined,
                 }}
               >
                 {isActive && (

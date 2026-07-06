@@ -97,7 +97,7 @@ export function ChunkingWidget({ index = 0, stats }: WidgetProps) {
       {/* 重叠区间高亮示意 */}
       <div className="mt-4 flex gap-1">
         {[0, 1, 2, 3].map((i) => (
-          <div key={i} className="relative h-2 flex-1 rounded-full bg-sky-500/25">
+          <div key={i} className="glass-track relative h-2 flex-1 rounded-full">
             {i > 0 && (
               <div className="absolute left-0 top-0 h-full w-[15%] rounded-l-full bg-fuchsia-400/70" />
             )}
@@ -158,7 +158,7 @@ export function InferenceWidget({ index = 0, stats }: WidgetProps) {
         <Metric value={tokPerSec.toLocaleString()} unit="ch/s" label="吞吐速度" />
         <Sparkline data={series} />
       </div>
-      <div className="mt-3 truncate rounded-lg bg-black/25 px-2.5 py-1.5 font-mono text-[11px] text-sky-200/80">
+      <div className="glass glass-control mt-3 truncate rounded-lg px-2.5 py-1.5 font-mono text-[11px] text-sky-200/80">
         {sampleVec}
       </div>
     </GlassCard>
@@ -175,7 +175,7 @@ export function MetadataWidget({ index = 0, stats }: WidgetProps) {
 }`;
   return (
     <GlassCard title="元数据绑定" subtitle="2.3 · Metadata" index={index}>
-      <pre className="overflow-x-auto rounded-xl bg-black/30 p-3 font-mono text-[11px] leading-relaxed text-white/70">
+      <pre className="glass glass-control overflow-x-auto rounded-xl p-3 font-mono text-[11px] leading-relaxed text-white/70">
         {json}
       </pre>
     </GlassCard>

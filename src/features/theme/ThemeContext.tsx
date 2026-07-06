@@ -10,13 +10,16 @@ import {
 } from 'react';
 import { getSetting, setSetting } from '@/services/tauriBridge';
 
-/** 可选的背景 distortion 预设。 */
+/** 动态背景预设；保留旧 value 以兼容已保存主题。 */
 export type BgStyle =
   | 'deepDistortion'
   | 'turbulentDistortion'
   | 'mountainDistortion'
   | 'LongRaceDistortion'
   | 'xyDistortion';
+
+export type BgImageFit = 'cover' | 'contain' | 'auto';
+export type BgImagePosition = 'center' | 'top' | 'bottom';
 
 export interface Theme {
   /** 玻璃透明度 0–0.35 */
@@ -31,7 +34,7 @@ export interface Theme {
   radius: number;
   /** 强调色（hex） */
   accent: string;
-  /** 背景光速隧道的 distortion 预设 */
+  /** 动态背景预设 */
   bgStyle: BgStyle;
   /** 文字亮度 0.6–1 */
   textStrength: number;
@@ -41,6 +44,12 @@ export interface Theme {
   bgBrightness: number;
   /** 背景开关 */
   bgEnabled: boolean;
+  /** 自定义背景图（data URL） */
+  bgImageDataUrl?: string;
+  /** 自定义背景图填充方式 */
+  bgImageFit: BgImageFit;
+  /** 自定义背景图位置 */
+  bgImagePosition: BgImagePosition;
   /** 字体 */
   font: 'sans' | 'serif' | 'mono' | 'rounded';
 }
@@ -64,6 +73,9 @@ export const DEFAULT_THEME: Theme = {
   shadowStrength: 1,
   bgBrightness: 1,
   bgEnabled: true,
+  bgImageDataUrl: '',
+  bgImageFit: 'cover',
+  bgImagePosition: 'center',
   font: 'sans',
 };
 

@@ -41,7 +41,7 @@ export function StatusDot({
 
 export function Badge({ children }: { children: React.ReactNode }) {
   return (
-    <span className="rounded-full border border-white/15 bg-white/10 px-2 py-0.5 text-[11px] text-white/70">
+    <span className="glass glass-chip px-2 py-0.5 text-[11px]">
       {children}
     </span>
   );
@@ -92,7 +92,7 @@ export function ProgressBar({
         ? 'linear-gradient(90deg,#c4b5fd,#e879f9)'
         : 'linear-gradient(90deg, rgb(var(--accent-rgb)), rgb(var(--accent-rgb) / 0.5))';
   return (
-    <div className="h-1.5 w-full overflow-hidden rounded-full bg-white/10">
+    <div className="glass-track h-1.5 w-full overflow-hidden rounded-full">
       <motion.div
         initial={{ width: 0 }}
         animate={{ width: `${Math.max(0, Math.min(100, value))}%` }}
@@ -164,7 +164,7 @@ export function ScoreBar({ label, score }: { label: string; score: number }) {
       <span className="w-10 shrink-0 truncate text-[11px] text-white/45">
         {label}
       </span>
-      <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-white/10">
+      <div className="glass-track h-1.5 flex-1 overflow-hidden rounded-full">
         <motion.div
           initial={{ width: 0 }}
           animate={{ width: `${score * 100}%` }}

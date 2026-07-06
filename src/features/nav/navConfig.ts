@@ -1,4 +1,4 @@
-export type ViewId = 'assistant' | 'settings';
+export type ViewId = 'assistant' | 'rag' | 'knowledge' | 'settings';
 
 export interface NavItem {
   id: ViewId;
@@ -20,6 +20,8 @@ export const NAV_GROUPS: NavGroup[] = [
     title: '系统',
     items: [
       { id: 'assistant', label: 'AI 对话', en: 'Chat',     icon: 'chat' },
+      { id: 'rag',       label: 'RAG 检索', en: 'RAG',      icon: 'workflow' },
+      { id: 'knowledge', label: 'Knowledge Base Manager', en: 'Knowledge', icon: 'database' },
       { id: 'settings',  label: '设置',    en: 'Settings', icon: 'gear' },
     ],
   },

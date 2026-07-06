@@ -40,12 +40,12 @@ export function GlassCard({
         damping: 18,
         delay: index * 0.06,
       }}
-      className={`glass relative overflow-hidden ${className}`}
+      className={`glass app-card relative overflow-hidden ${className}`}
     >
       {/* 顶部高光描边（玻璃厚度感） */}
       <div className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-white/70 to-transparent" />
       {/* 柔和内发光（中性） */}
-      <div className="pointer-events-none absolute -top-16 right-0 h-32 w-32 rounded-full bg-white/[0.09] blur-3xl" />
+      <div className="app-card-glow pointer-events-none absolute -top-16 right-0 h-32 w-32 rounded-full blur-3xl" />
 
       <div className="relative p-5">
         {(title || badge) && (

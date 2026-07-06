@@ -83,7 +83,7 @@ const components: Components = {
 
   // 表格（GFM）
   table: ({ children }) => (
-    <div className="my-2 overflow-x-auto rounded-lg border border-white/[0.08]">
+    <div className="glass glass-control my-2 overflow-x-auto rounded-lg">
       <table className="w-full text-sm">{children}</table>
     </div>
   ),
@@ -123,7 +123,7 @@ function CodeBlock({
     // 行内代码
     return (
       <code
-        className="rounded-md bg-white/[0.08] px-1.5 py-0.5 font-mono text-[0.8em] text-[#a78bfa]"
+        className="glass glass-chip rounded-md px-1.5 py-0.5 font-mono text-[0.8em] text-[#a78bfa]"
         {...props}
       >
         {children}
@@ -133,7 +133,7 @@ function CodeBlock({
 
   // 代码块
   return (
-    <div className="relative overflow-hidden rounded-xl border border-white/[0.08] bg-[#0d0f17]">
+    <div className="glass glass-control relative overflow-hidden rounded-xl">
       {/* 顶部工具栏 */}
       <div className="flex items-center justify-between border-b border-white/[0.06] px-4 py-2">
         <span className="font-mono text-[10px] uppercase tracking-wider text-white/30">
@@ -169,7 +169,7 @@ function CopyButton({ text }: { text: string }) {
     <button
       type="button"
       onClick={handleCopy}
-      className="flex items-center gap-1 rounded-md px-2 py-0.5 text-[10px] text-white/30 transition-colors hover:bg-white/[0.06] hover:text-white/60"
+      className="glass glass-button glass-control rounded-md px-2 py-0.5 text-[10px] text-white/40"
     >
       {copied ? (
         <>
