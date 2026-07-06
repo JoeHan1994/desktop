@@ -1,0 +1,15 @@
+{
+  "rust-analyzer.linkedProjects": ["src-tauri/Cargo.toml"],
+  "rust-analyzer.check.command": "clippy",
+  "files.associations": {
+    "*.glsl": "glsl",
+    "*.vertex.glsl": "glsl",
+    "*.fragment.glsl": "glsl"
+  },
+  "[typescript]": {
+    "editor.defaultFormatter": "esbenp.prettier-vscode"
+  },
+  "[typescriptreact]": {
+    "editor.defaultFormatter": "esbenp.prettier-vscode"
+  }
+}

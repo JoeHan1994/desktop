@@ -1,0 +1,148 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --background: 0 0 0;
+  --foreground: 255 255 255;
+
+  /* ===== 全局主题变量（由外观配置器实时驱动） ===== */
+  --glass-rgb: 255 255 255;      /* 玻璃底色 */
+  --glass-alpha: 0.12;           /* 玻璃透明度 */
+  --glass-border-alpha: 0.2;     /* 玻璃边框透明度 */
+  --glass-blur: 24px;            /* 毛玻璃模糊 */
+  --glass-saturate: 1.5;         /* 背景饱和度增强 */
+  --glass-radius: 28px;          /* 圆角 */
+  --accent-rgb: 56 189 248;      /* 强调色 */
+  --text-strength: 1;            /* 文字亮度 0.6–1 */
+  --shadow-strength: 1;          /* 阴影强度 0–1 */
+  --app-font: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto,
+    'PingFang SC', 'Microsoft YaHei', sans-serif; /* 字体 */
+}
+
+html,
+body {
+  height: 100%;
+  max-width: 100vw;
+  overflow: hidden;
+  background: #04060c; /* 深色兜底，transparent 窗口加载期间不闪白 */
+}
+
+body {
+  color: rgb(var(--foreground));
+  background: rgb(var(--background));
+  font-family: var(--app-font);
+}
+
+@layer utilities {
+  /* 全局文字亮度：覆盖 Tailwind 的 .text-white，使主文本亮度可调 */
+  .text-white {
+    color: rgb(255 255 255 / var(--text-strength)) !important;
+  }
+}
+
+@layer components {
+  /* 统一的液态玻璃表面：卡片 / 面板等使用，随主题变量实时变化 */
+  .glass {
+    background-color: rgb(var(--glass-rgb) / var(--glass-alpha));
+    border: 1px solid rgb(255 255 255 / var(--glass-border-alpha));
+    border-radius: var(--glass-radius);
+    -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+    backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+    box-shadow:
+      0 20px 45px -12px rgb(0 0 0 / calc(0.5 * var(--shadow-strength))),
+      inset 0 0 0 1px rgb(255 255 255 / 0.08);
+  }
+
+  /* 仅底色 + 毛玻璃（用于侧边栏等自定义形状） */
+  .glass-bg {
+    background-color: rgb(var(--glass-rgb) / var(--glass-alpha));
+    -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+    backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+  }
+}
+
+/* 环境光背景：极缓慢的极光漂移，营造安静的空间纵深 */
+@keyframes ambient-drift-a {
+  0%,
+  100% {
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  50% {
+    transform: translate3d(4%, -3%, 0) scale(1.12);
+  }
+}
+
+@keyframes ambient-drift-b {
+  0%,
+  100% {
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  50% {
+    transform: translate3d(-5%, 4%, 0) scale(1.18);
+  }
+}
+
+/* 透视网格向观者缓慢推进，制造无限延伸的 3D 空间纵深 */
+@keyframes grid-flow {
+  0% {
+    background-position: 0 0;
+  }
+  100% {
+    background-position: 0 64px;
+  }
+}
+
+/* 地平线辉光缓慢呼吸 */
+@keyframes horizon-pulse {
+  0%,
+  100% {
+    opacity: 0.5;
+  }
+  50% {
+    opacity: 0.9;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [class*='ambient-orb'],
+  [class*='ambient-grid'],
+  [class*='ambient-horizon'] {
+    animation: none !important;
+  }
+}
+
+/* ===== 全局滚动条美化（WebKit / Blink / Tauri WebView） ===== */
+::-webkit-scrollbar {
+  width: 4px;
+  height: 4px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(255 255 255 / 0.12);
+  border-radius: 99px;
+  transition: background 0.2s;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255 255 255 / 0.28);
+}
+
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* ===== Select 下拉选项深色主题（Chromium / Tauri WebView） ===== */
+select option {
+  background-color: #12121e;
+  color: #e2e8f0;
+}
+
+select option:checked,
+select option:hover {
+  background-color: #1e1e32;
+}
