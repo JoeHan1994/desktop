@@ -69,6 +69,83 @@ function updateNode(
   });
 }
 
+// ── 错误 / 警告行分类与高亮显示 ─────────────────────────────────
+
+/** 匹配错误级别的日志行模式（英文 + 中文 + 堆栈跟踪） */
+const RE_ERROR = /\b(error|errors|exception|exceptions|fatal|critical|traceback|panic|crash|crashed|failed|failure)\b|\b(Error|Exception|Fatal)\b|\[\ *ERROR\b|\[\ *FATAL\b|错误|异常|失败|崩溃/i;
+
+const RE_WARN  = /\b(warn(?:ing)?|caution|deprecated|deprecation)\b|\[\ *WARN\b|警告|注意/i;
+
+/** Java/Python/.NET 堆栈跟踪行 */
+const RE_STACK = /^\s+at\s+|^\s+caused\s+by\s*:|^\s+\.{3}\s+\d+\s+more\b|^\s+File\s+".+",\s+line\s+\d+/i;
+
+type LineLevel = 'error' | 'warn' | 'normal';
+
+function classifyLine(line: string): LineLevel {
+  if (RE_ERROR.test(line) || RE_STACK.test(line)) return 'error';
+  if (RE_WARN.test(line))  return 'warn';
+  return 'normal';
+}
+
+const MAX_LINES = 8000;
+
+/** 带行号的只读视图，错误行红色高亮，警告行黄色高亮。 */
+function HighlightedContent({ content }: { content: string }) {
+  const raw   = content.split('\n');
+  const lines = raw.length > MAX_LINES ? raw.slice(0, MAX_LINES) : raw;
+  const clipped = raw.length > MAX_LINES;
+
+  return (
+    <div className="min-h-0 flex-1 overflow-y-auto select-text">
+      <table className="w-full border-collapse font-mono text-[12.5px] leading-[1.65]">
+        <tbody>
+          {lines.map((line, i) => {
+            const lvl = classifyLine(line);
+            return (
+              <tr
+                key={i}
+                className={`group ${
+                  lvl === 'error' ? 'bg-rose-500/[0.09] hover:bg-rose-500/[0.14]' :
+                  lvl === 'warn'  ? 'bg-amber-400/[0.08] hover:bg-amber-400/[0.13]' :
+                  'hover:bg-white/[0.03]'
+                }`}
+              >
+                {/* 行号 */}
+                <td className="w-12 shrink-0 select-none pr-4 pl-3 text-right text-[11px] text-white/20 align-top pt-px">
+                  {i + 1}
+                </td>
+
+                {/* 行内容 */}
+                <td className={`pr-5 break-all whitespace-pre-wrap align-top ${
+                  lvl === 'error' ? 'text-rose-300' :
+                  lvl === 'warn'  ? 'text-amber-300' :
+                  'text-white/78'
+                }`}>
+                  {/* 错误 / 警告左边屏 */}
+                  {lvl !== 'normal' && (
+                    <span className={`mr-2 inline-block h-full w-0.5 rounded-full align-middle ${
+                      lvl === 'error' ? 'bg-rose-400' : 'bg-amber-400'
+                    }`} />
+                  )}
+                  {line || '\u00a0'}
+                </td>
+              </tr>
+            );
+          })}
+
+          {clipped && (
+            <tr>
+              <td colSpan={2} className="py-2 text-center text-[11px] text-white/25">
+                文件较大，仅显示前 {MAX_LINES.toLocaleString()} 行（共 {raw.length.toLocaleString()} 行）
+              </td>
+            </tr>
+          )}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 // ── 树节点组件 ─────────────────────────────────────────────────────────────
 
 function TreeItem({
@@ -192,6 +269,7 @@ export function RemoteMachineView() {
   // 编辑器
   const [fileContent, setFileContent] = useState('');
   const [editorDraft, setEditorDraft] = useState('');
+  const [isEditing, setIsEditing] = useState(false);
   const [loadingFile, setLoadingFile] = useState(false);
   const [saving, setSaving] = useState(false);
   const [saveMsg, setSaveMsg] = useState('');
@@ -316,6 +394,7 @@ export function RemoteMachineView() {
     setSelectedFile(node.path);
     setFileContent('');
     setEditorDraft('');
+    setIsEditing(false);
     setSaveMsg('');
     isDirty.current = false;
     loadFile(node.path);
@@ -372,6 +451,7 @@ export function RemoteMachineView() {
       await invoke('ssh_write_file', { path: selectedFile, content: editorDraft });
       isDirty.current = false;
       setFileContent(editorDraft);
+      setIsEditing(false);
       showSaveMsg('✓ 已保存');
     } catch (err: unknown) {
       showSaveMsg(`✗ 保存失败: ${String(err)}`);
@@ -614,14 +694,28 @@ export function RemoteMachineView() {
                 {/* 手动刷新 */}
                 <button
                   type="button"
-                  onClick={() => { isDirty.current = false; loadFile(selectedFile); }}
+                  onClick={() => { isDirty.current = false; setIsEditing(false); loadFile(selectedFile); }}
                   className="shrink-0 rounded-lg bg-white/[0.04] px-2.5 py-1
                     text-[11px] text-white/35 transition-colors hover:text-white/65"
                 >
                   刷新
                 </button>
 
-                {/* 保存 */}
+                {/* 视图 / 编辑 切换 */}
+                <button
+                  type="button"
+                  onClick={() => setIsEditing((v) => !v)}
+                  className={`shrink-0 rounded-lg px-2.5 py-1 text-[11px] transition-colors ${
+                    isEditing
+                      ? 'bg-white/[0.08] text-white/70 hover:text-white'
+                      : 'bg-white/[0.04] text-white/35 hover:text-white/65'
+                  }`}
+                >
+                  {isEditing ? '🔒 退出编辑' : '✏️ 编辑'}
+                </button>
+
+                {/* 保存（仅编辑模式显示） */}
+                {isEditing && (
                 <button
                   type="button"
                   onClick={handleSave}
@@ -635,6 +729,7 @@ export function RemoteMachineView() {
                 >
                   {saving ? '保存中…' : '保 存'}
                 </button>
+                )}
 
                 {/* 保存状态提示 */}
                 <AnimatePresence>
@@ -651,7 +746,7 @@ export function RemoteMachineView() {
                 </AnimatePresence>
               </div>
 
-              {/* 编辑区 */}
+              {/* 查看区 / 编辑区 */}
               {loadingFile ? (
                 <div className="flex flex-1 items-center justify-center gap-2 text-sm text-white/30">
                   <svg className="h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none"
@@ -660,7 +755,7 @@ export function RemoteMachineView() {
                   </svg>
                   加载中…
                 </div>
-              ) : (
+              ) : isEditing ? (
                 <textarea
                   className="min-h-0 flex-1 resize-none bg-transparent px-5 py-4
                     font-mono text-[13px] leading-relaxed text-white/80
@@ -669,7 +764,10 @@ export function RemoteMachineView() {
                   value={editorDraft}
                   onChange={(e) => handleDraftChange(e.target.value)}
                   placeholder="选择文件后显示内容…"
+                  autoFocus
                 />
+              ) : (
+                <HighlightedContent content={editorDraft} />
               )}
             </motion.div>
           ) : (
