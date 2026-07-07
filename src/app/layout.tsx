@@ -25,10 +25,10 @@ export default function RootLayout({
       <body className="overflow-hidden bg-[#04060c] text-white antialiased">
         <ThemeProvider>
           <ModelProvidersProvider>
-          <div className="relative flex h-screen flex-col bg-[#04060c]">
+          <div className="relative flex h-screen min-h-0 flex-col bg-[#04060c]">
             {/* 全局 Hyperspeed 光速隧道背景 */}
             <HyperspeedBackground />
-            <main className="relative z-10 flex-1 min-h-0">
+            <main className="relative z-10 flex-1 min-h-0 h-full overflow-hidden">
               <ErrorBoundary>{children}</ErrorBoundary>
             </main>
           </div>

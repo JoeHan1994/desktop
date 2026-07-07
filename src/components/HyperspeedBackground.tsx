@@ -26,7 +26,7 @@ export function HyperspeedBackground() {
       {theme.bgEnabled && hasCustomImage ? (
         <div className="absolute inset-0 transition-opacity duration-300" style={imageStyle} />
       ) : (
-        theme.bgEnabled && <Galaxy {...galaxyPreset} />
+        theme.bgEnabled && <Galaxy {...galaxyPreset} mouseInteraction={false} />
       )}
       {/* 背景明暗遮罩 */}
       <div

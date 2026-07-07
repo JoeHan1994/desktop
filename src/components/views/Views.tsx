@@ -27,7 +27,7 @@ function PageTitle({
   return (
     <div className="flex shrink-0 items-center gap-3">
       {stage && (
-        <span className="glass glass-chip px-2.5 py-0.5 text-[10px] font-medium uppercase tracking-wider text-white/45">
+        <span className="glass glass-chip px-2.5 py-0.5 card-label">
           {stage}
         </span>
       )}
@@ -45,6 +45,74 @@ function PageTitle({
 
 const fieldCls =
   'glass glass-input w-full rounded-xl px-3 py-2 text-sm text-white placeholder:text-white/30 focus:outline-none';
+
+function GlassSelect({ value, options, onChange }: {
+  value: string;
+  options: string[];
+  onChange: (v: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    function handleClick(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    }
+    document.addEventListener('mousedown', handleClick);
+    return () => document.removeEventListener('mousedown', handleClick);
+  }, [open]);
+
+  return (
+    <div ref={ref} className="relative w-full">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        className="glass glass-input flex w-full items-center justify-between rounded-xl px-3 py-2 text-sm text-white focus:outline-none"
+      >
+        <span className="truncate">{value}</span>
+        <svg
+          viewBox="0 0 12 12"
+          className={`h-3 w-3 shrink-0 text-white/40 transition-transform duration-200 ${open ? 'rotate-180' : ''}`}
+          fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"
+        >
+          <path d="M2 4l4 4 4-4" />
+        </svg>
+      </button>
+
+      <AnimatePresence>
+        {open && (
+          <motion.div
+            initial={{ opacity: 0, y: -4, scaleY: 0.95 }}
+            animate={{ opacity: 1, y: 0, scaleY: 1 }}
+            exit={{ opacity: 0, y: -4, scaleY: 0.95 }}
+            transition={{ duration: 0.15, ease: 'easeOut' }}
+            style={{ transformOrigin: 'top' }}
+            className="glass absolute left-0 right-0 top-[calc(100%+6px)] z-50 overflow-hidden rounded-xl border border-white/[0.1] py-1 shadow-xl shadow-black/50 backdrop-blur-xl"
+          >
+            {options.map((opt) => (
+              <button
+                key={opt}
+                type="button"
+                onClick={() => { onChange(opt); setOpen(false); }}
+                className={`flex w-full items-center gap-2.5 px-3 py-2 text-left text-sm transition-colors hover:bg-white/[0.07] ${
+                  opt === value ? 'text-white' : 'text-white/55'
+                }`}
+              >
+                {opt === value && (
+                  <svg viewBox="0 0 10 10" className="h-2.5 w-2.5 shrink-0 text-emerald-400" fill="currentColor">
+                    <path d="M1.5 5l2.5 2.5 5-5" stroke="currentColor" strokeWidth="1.6" fill="none" strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
+                )}
+                <span className={`truncate ${opt === value ? '' : 'pl-[18px]'}`}>{opt}</span>
+              </button>
+            ))}
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  );
+}
 
 function FormRow({
   label,
@@ -114,8 +182,28 @@ function ProviderModal({
 }) {
   const [form, setForm] = useState<Omit<ModelProvider, 'id'>>(initialData ?? EMPTY_FORM);
   const [showKey, setShowKey] = useState(false);
+  const [ollamaModels, setOllamaModels] = useState<string[]>([]);
+  const [ollamaLoading, setOllamaLoading] = useState(false);
   const meta = PROVIDER_META[form.provider];
   const isEditing = !!initialData;
+
+  useEffect(() => {
+    if (form.provider !== 'ollama') return;
+    setOllamaLoading(true);
+    const base = (form.apiBaseUrl || PROVIDER_META.ollama.defaultUrl).replace(/\/$/, '');
+    fetch(`${base}/api/tags`)
+      .then((r) => r.json())
+      .then((data) => {
+        const names: string[] = (data?.models ?? []).map((m: { name: string }) => m.name);
+        setOllamaModels(names);
+        if (names.length > 0 && !names.includes(form.model)) {
+          setForm((prev) => ({ ...prev, model: names[0] }));
+        }
+      })
+      .catch(() => setOllamaModels([]))
+      .finally(() => setOllamaLoading(false));
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [form.provider, form.apiBaseUrl]);
 
   function set<K extends keyof typeof form>(k: K, v: (typeof form)[K]) {
     setForm((prev) => ({ ...prev, [k]: v }));
@@ -153,7 +241,7 @@ function ProviderModal({
         className="pointer-events-none fixed inset-0 z-50 flex items-center justify-center"
       >
         <div
-          className="glass pointer-events-auto w-[460px] overflow-hidden rounded-2xl shadow-2xl shadow-black/60"
+          className="glass pointer-events-auto w-[min(90vw,460px)] overflow-hidden rounded-2xl shadow-2xl shadow-black/60"
           onClick={(e) => e.stopPropagation()}
         >
           {/* 顶部高光 */}
@@ -226,12 +314,36 @@ function ProviderModal({
 
             {/* Model */}
             <FormRow label="Model" required>
-              <input
-                className={fieldCls}
-                placeholder={meta.modelPlaceholder}
-                value={form.model}
-                onChange={(e) => set('model', e.target.value)}
-              />
+              {form.provider === 'ollama' ? (
+                ollamaLoading ? (
+                  <div className={fieldCls + ' flex items-center gap-2 text-white/35'}>
+                    <svg className="h-3.5 w-3.5 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83" />
+                    </svg>
+                    <span className="text-[12px]">正在获取模型列表…</span>
+                  </div>
+                ) : ollamaModels.length > 0 ? (
+                  <GlassSelect
+                    value={form.model}
+                    options={ollamaModels}
+                    onChange={(v) => set('model', v)}
+                  />
+                ) : (
+                  <input
+                    className={fieldCls}
+                    placeholder="无法连接 Ollama，请手动输入模型名"
+                    value={form.model}
+                    onChange={(e) => set('model', e.target.value)}
+                  />
+                )
+              ) : (
+                <input
+                  className={fieldCls}
+                  placeholder={meta.modelPlaceholder}
+                  value={form.model}
+                  onChange={(e) => set('model', e.target.value)}
+                />
+              )}
             </FormRow>
 
             {/* API Key */}
@@ -507,7 +619,7 @@ function ModelSelector({
   if (providers.length === 0) {
     return (
       <div className="glass app-card rounded-xl p-3.5 space-y-2">
-        <div className="text-[10px] uppercase tracking-wider text-white/35">Model</div>
+        <div className="card-label">Model</div>
         <div className="flex flex-col items-center gap-2 py-3 text-center">
           <svg viewBox="0 0 24 24" className="h-6 w-6 text-white/20" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round">
             <rect x="2" y="3" width="20" height="14" rx="2" />
@@ -526,7 +638,7 @@ function ModelSelector({
 
   return (
     <div className="glass app-card rounded-xl p-3.5 space-y-2.5">
-      <div className="text-[10px] uppercase tracking-wider text-white/35">Model</div>
+      <div className="card-label">Model</div>
 
       {/* Current model pill / trigger */}
       <button
@@ -666,7 +778,7 @@ function TokenViz({
 
   return (
     <div className="glass app-card rounded-xl p-3.5 space-y-3">
-      <div className="text-[10px] uppercase tracking-wider text-white/35">Tokens</div>
+      <div className="card-label">Tokens</div>
 
       {/* 三行横条（Input/Output 对最大値归一，Total 对 ctxLimit） */}
       <div className="space-y-2.5">
@@ -867,8 +979,8 @@ export function AssistantView() {
   return (
     <div className="flex h-full min-h-0 gap-3 overflow-hidden">
 
-      {/* ── 左 70%：对话区 ── */}
-      <div className="flex min-h-0 flex-[7] flex-col gap-3">
+      {/* ── 左：对话区 ── */}
+      <div className="flex min-h-0 flex-1 flex-col gap-3 md:flex-[7]">
 
         {/* 消息列表 */}
         <div className="min-h-0 flex-1 overflow-y-auto pr-1">
@@ -1010,8 +1122,8 @@ export function AssistantView() {
         </div>
       </div>
 
-      {/* ── 右 30%：模型选择 + Token 可视化 ── */}
-      <div className="flex min-h-0 flex-[3] flex-col gap-3 overflow-y-auto">
+      {/* ── 右：模型选择 + Token 可视化 ── */}
+      <div className="hidden min-h-0 flex-[3] flex-col gap-3 overflow-y-auto md:flex">
         <ModelSelector selected={model} onChange={setModel} />
         <TokenViz messages={messages} ctxLimit={32768} latestStats={latestStats} />
       </div>
@@ -1172,11 +1284,11 @@ export function RagView() {
         </div>
       </div>
 
-      <div className="grid min-h-0 flex-1 grid-cols-1 gap-3 xl:grid-cols-[minmax(0,1.35fr)_minmax(320px,0.75fr)]">
+      <div className="grid min-h-0 flex-1 grid-cols-1 gap-3 lg:grid-cols-[minmax(0,1.35fr)_minmax(280px,0.75fr)]">
         <div className="flex min-h-0 flex-col gap-3 overflow-hidden">
           <div className="glass glass-input shrink-0 rounded-2xl p-3.5">
             <div className="mb-2 flex items-center justify-between gap-2">
-              <span className="text-[10px] uppercase tracking-wider text-white/35">Query Composer</span>
+              <span className="card-label">Query Composer</span>
               <span className="glass glass-chip px-2 py-0.5 text-[10px] text-white/35">{modeCopy[mode].desc}</span>
             </div>
             <div className="flex items-end gap-2">
@@ -1203,7 +1315,7 @@ export function RagView() {
             {RAG_STEPS.map((step) => (
               <div key={step.label} className="glass app-card rounded-2xl p-3">
                 <div className="flex items-center justify-between gap-2">
-                  <span className="text-[10px] uppercase tracking-wider text-white/35">{step.label}</span>
+                  <span className="card-label">{step.label}</span>
                   <span className="h-2 w-2 rounded-full" style={{ backgroundColor: step.color }} />
                 </div>
                 <div className="mt-2 text-sm font-semibold text-white">{step.value}</div>
@@ -1217,7 +1329,7 @@ export function RagView() {
           <div className="grid min-h-0 flex-1 grid-cols-1 gap-3 lg:grid-cols-[minmax(0,0.95fr)_minmax(0,1.05fr)]">
             <div className="flex min-h-0 flex-col gap-2 overflow-hidden">
               <div className="flex shrink-0 items-center justify-between px-1">
-                <span className="text-[10px] uppercase tracking-wider text-white/35">Retrieved Sources</span>
+                <span className="card-label">Retrieved Sources</span>
                 <span className="text-[10px] text-white/25">Top 3 / mock</span>
               </div>
               <div className="min-h-0 space-y-2 overflow-y-auto pr-1">
@@ -1235,7 +1347,7 @@ export function RagView() {
             <div className="glass app-card flex min-h-0 flex-col overflow-hidden rounded-2xl">
               <div className="flex shrink-0 items-center justify-between border-b border-white/[0.08] px-4 py-3">
                 <div className="min-w-0">
-                  <div className="text-[10px] uppercase tracking-wider text-white/35">Grounded Answer Preview</div>
+                  <div className="card-label">Grounded Answer Preview</div>
                   <div className="mt-1 truncate text-sm font-semibold text-white">{activeSource.title}</div>
                 </div>
                 <span className="glass glass-chip shrink-0 px-2 py-0.5 text-[10px] text-emerald-300/80">Cited</span>
@@ -1248,7 +1360,7 @@ export function RagView() {
                   </p>
                   <div className="app-card-surface rounded-xl p-3">
                     <div className="mb-2 flex items-center justify-between gap-2">
-                      <span className="text-[10px] uppercase tracking-wider text-white/35">Selected Context</span>
+                      <span className="card-label">Selected Context</span>
                       <span className="text-[10px] tabular-nums text-white/30">score {activeSource.score.toFixed(2)}</span>
                     </div>
                     <p className="text-[12px] leading-relaxed text-white/55">{activeSource.excerpt}</p>
@@ -1336,7 +1448,7 @@ export function RagView() {
 /* ------------------------------------------------------------------ */
 
 type KbParseStatus = 'parsing' | 'completed';
-type KbFormat = 'pdf' | 'excel' | 'word';
+type KbFormat = 'pdf' | 'excel' | 'word' | 'csv' | 'markdown' | 'text';
 
 interface KbChunk {
   id: string;
@@ -1363,8 +1475,11 @@ const KB_TOKEN_LIMIT = 8192;
 function inferKbFormat(fileName: string): KbFormat | null {
   const extension = fileName.split('.').pop()?.toLowerCase();
   if (extension === 'pdf') return 'pdf';
-  if (extension === 'xls' || extension === 'xlsx' || extension === 'csv') return 'excel';
+  if (extension === 'xls' || extension === 'xlsx') return 'excel';
+  if (extension === 'csv') return 'csv';
   if (extension === 'doc' || extension === 'docx') return 'word';
+  if (extension === 'md' || extension === 'markdown') return 'markdown';
+  if (extension === 'txt') return 'text';
   return null;
 }
 
@@ -1380,7 +1495,7 @@ function createKbChunks(fileName: string, size: number, format: KbFormat): KbChu
     const chars = 820 + index * 134 + (fileName.length % 7) * 29;
     const tokens = Math.round(chars * 1.27 + index * 18);
     const metadata: Record<string, string | number> = {
-      页码: format === 'excel' ? `Sheet ${Math.max(1, index % 3 + 1)}` : index + 1,
+      页码: (format === 'excel' || format === 'csv') ? `Sheet ${Math.max(1, index % 3 + 1)}` : index + 1,
       格式: format,
       提取时间: '2026-07',
       source: fileName,
@@ -1536,7 +1651,6 @@ export function KnowledgeBaseManagerView() {
   const [files, setFiles] = useState<KbFileRecord[]>(KB_INITIAL_FILES);
   const [selectedFileId, setSelectedFileId] = useState(KB_INITIAL_FILES[0].id);
   const [selectedChunkId, setSelectedChunkId] = useState(KB_INITIAL_FILES[0].chunks[0].id);
-  const [dragActive, setDragActive] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -1598,23 +1712,13 @@ export function KnowledgeBaseManagerView() {
           title="Knowledge Base Manager"
           desc="上传解析、Chunk 审核与向量化流水线预览"
         />
-        <button
-          type="button"
-          onClick={() => fileInputRef.current?.click()}
-          className="glass glass-button glass-control rounded-xl px-3.5 py-1.5 text-sm font-medium"
-        >
-          <svg viewBox="0 0 14 14" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M7 10V2" /><path d="M3.5 5.5 7 2l3.5 3.5" /><path d="M2 10v1.5h10V10" />
-          </svg>
-          Upload
-        </button>
       </div>
 
       <input
         ref={fileInputRef}
         type="file"
         multiple
-        accept=".pdf,.xls,.xlsx,.doc,.docx"
+        accept=".pdf,.xls,.xlsx,.doc,.docx,.csv,.md,.markdown,.txt"
         className="hidden"
         onChange={(event) => addFiles(event.target.files)}
       />
@@ -1622,25 +1726,21 @@ export function KnowledgeBaseManagerView() {
       <div className="grid min-h-0 flex-1 grid-cols-1 gap-3 lg:grid-cols-12">
         <div className="flex min-h-0 flex-col gap-3 overflow-hidden lg:col-span-3">
           <div
-            onDragEnter={(event) => { event.preventDefault(); setDragActive(true); }}
-            onDragOver={(event) => { event.preventDefault(); setDragActive(true); }}
-            onDragLeave={() => setDragActive(false)}
-            onDrop={(event) => {
-              event.preventDefault();
-              setDragActive(false);
-              addFiles(event.dataTransfer.files);
-            }}
-            className={`glass app-card app-card-control glass-control shrink-0 rounded-2xl p-3 ${dragActive ? 'border-white/35 text-white' : 'text-white/60'}`}
+            role="button"
+            tabIndex={0}
+            onClick={() => fileInputRef.current?.click()}
+            onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') fileInputRef.current?.click(); }}
+            className="glass app-card app-card-control glass-control shrink-0 cursor-pointer rounded-2xl p-3 text-white/60"
           >
             <div className="flex items-start gap-3">
               <div className="glass-icon-button app-card-surface glass-control flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl">
-                <svg viewBox="0 0 24 24" className="h-5 w-5 text-white/45" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M12 16V4" /><path d="m7 9 5-5 5 5" /><path d="M4 16v3h16v-3" />
+                <svg viewBox="0 0 14 14" className="h-4 w-4 text-white/45" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M7 10V2" /><path d="M3.5 5.5 7 2l3.5 3.5" /><path d="M2 10v1.5h10V10" />
                 </svg>
               </div>
               <div className="min-w-0">
-                <div className="text-sm font-semibold text-white">拖拽文件</div>
-                <div className="mt-1 text-[11px] leading-relaxed text-white/35">支持 PDF / Excel / Word，解析完成后进入 Chunk 审核。</div>
+                <div className="text-sm font-semibold text-white">上传文件</div>
+                <div className="mt-1 text-[11px] leading-relaxed text-white/35">支持 PDF / Excel / Word / CSV / Markdown / TXT，解析完成后进入 Chunk 审核。</div>
               </div>
             </div>
           </div>
@@ -1648,7 +1748,7 @@ export function KnowledgeBaseManagerView() {
           <div className="glass app-card flex min-h-0 flex-col overflow-hidden rounded-2xl p-3">
             <div className="mb-3 flex shrink-0 items-center justify-between gap-2">
               <div>
-                <div className="text-[10px] uppercase tracking-wider text-white/35">Files</div>
+                <div className="card-label">Files</div>
                 <div className="mt-1 text-sm font-semibold text-white">上传与解析状态</div>
               </div>
               <span className="glass-chip app-card-surface px-2 py-0.5 text-[10px] text-white/35">{files.length} files</span>
@@ -1670,7 +1770,7 @@ export function KnowledgeBaseManagerView() {
           <div className="glass app-card shrink-0 rounded-2xl p-3.5">
             <div className="flex items-start justify-between gap-3">
               <div className="min-w-0">
-                <div className="text-[10px] uppercase tracking-wider text-white/35">Chunk Viewer</div>
+                <div className="card-label">Chunk Viewer</div>
                 <div className="mt-1 truncate text-sm font-semibold text-white">{selectedFile.name}</div>
               </div>
               <div className="glass-chip app-card-surface shrink-0 px-2.5 py-1 text-[11px] text-white/45">
@@ -1695,7 +1795,7 @@ export function KnowledgeBaseManagerView() {
 
             <div className="app-card-surface mt-3 rounded-xl p-3">
               <div className="mb-2 flex items-center justify-between gap-2">
-                <span className="text-[10px] uppercase tracking-wider text-white/35">Metadata Audit</span>
+                <span className="card-label">Metadata Audit</span>
                 <span className="glass-chip glass-status-success border px-2 py-0.5 text-[10px] text-emerald-300/80">bound</span>
               </div>
               <div className="flex flex-wrap gap-1.5">
@@ -1724,7 +1824,7 @@ export function KnowledgeBaseManagerView() {
           <div className="mb-3 flex shrink-0 items-start justify-between gap-3">
             <div>
               <div className="text-sm font-semibold text-white">Vectorization Pipeline</div>
-              <div className="mt-0.5 text-[10px] uppercase tracking-wider text-white/35">bge-m3 local preview</div>
+              <div className="mt-0.5 card-label">bge-m3 local preview</div>
             </div>
             <span className="glass-chip app-card-surface px-2 py-0.5 text-[10px] text-white/35">5 stages</span>
           </div>
@@ -1742,7 +1842,7 @@ export function KnowledgeBaseManagerView() {
             <div className="min-h-0 space-y-2 overflow-y-auto pr-1">
               <div className="app-card-surface rounded-xl p-2.5">
                 <div className="flex items-center justify-between gap-2">
-                  <span className="text-[10px] uppercase tracking-wider text-white/35">Stage 1 · Tokenization</span>
+                  <span className="card-label">Stage 1 · Tokenization</span>
                   <span className={`text-[10px] ${isTruncated ? 'text-rose-300' : 'text-emerald-300/80'}`}>{isTruncated ? '自动截断' : '安全'}</span>
                 </div>
                 <div className="mt-2 text-[12px] text-white/55">
@@ -1755,7 +1855,7 @@ export function KnowledgeBaseManagerView() {
               </div>
 
               <div className="app-card-surface rounded-xl p-2.5">
-                <div className="text-[10px] uppercase tracking-wider text-white/35">Stage 2 · Batching Queue</div>
+                <div className="card-label">Stage 2 · Batching Queue</div>
                 <div className="mt-2 grid grid-cols-4 gap-1.5">
                   {Array.from({ length: 4 }, (_, index) => (
                     <div key={index} className="app-card-surface rounded-xl p-2 text-center">
@@ -1770,7 +1870,7 @@ export function KnowledgeBaseManagerView() {
               </div>
 
               <div className="app-card-surface rounded-xl p-2.5">
-                <div className="text-[10px] uppercase tracking-wider text-white/35">Stage 3 · API Payload & Compute</div>
+                <div className="card-label">Stage 3 · API Payload & Compute</div>
                 <div className="mt-3 grid grid-cols-3 gap-2">
                   {[
                     ['Req Size', `${reqSizeKb}KB`, '#60a5fa'],
@@ -1788,7 +1888,7 @@ export function KnowledgeBaseManagerView() {
 
               <div className="app-card-surface rounded-xl p-2.5">
                 <div className="flex items-center justify-between gap-2">
-                  <span className="text-[10px] uppercase tracking-wider text-white/35">Stage 4 · Vector L2 Norm</span>
+                  <span className="card-label">Stage 4 · Vector L2 Norm</span>
                   <span className="glass-chip glass-status-success border px-2 py-0.5 text-[10px] text-emerald-300/80">L2 Normalize Success</span>
                 </div>
                 <div className="mt-3">
@@ -1799,7 +1899,7 @@ export function KnowledgeBaseManagerView() {
 
               <div className="app-card-surface rounded-xl p-2.5">
                 <div className="flex items-center justify-between gap-2">
-                  <span className="text-[10px] uppercase tracking-wider text-white/35">Stage 5 · Upsert & Indexing</span>
+                  <span className="card-label">Stage 5 · Upsert & Indexing</span>
                   <span className="flex items-center gap-1 text-[10px] text-emerald-300/80">
                     <svg viewBox="0 0 12 12" className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
                       <path d="M2 6.5 4.8 9 10 3" />

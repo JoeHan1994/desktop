@@ -57,7 +57,7 @@ export function GlassCard({
                 </h3>
               )}
               {subtitle && (
-                <p className="mt-0.5 text-[11px] uppercase tracking-wider text-white/40">
+                <p className="mt-0.5 card-label">
                   {subtitle}
                 </p>
               )}

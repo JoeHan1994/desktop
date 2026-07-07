@@ -31,9 +31,11 @@
         "title": "Vector Vision",
         "width": 1280,
         "height": 800,
+        "minWidth": 1380,
+        "minHeight": 780,
         "resizable": true,
         "fullscreen": false,
-        "transparent": true,
+        "transparent": false,
         "decorations": false
       }
     ],

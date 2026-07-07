@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
-import { motion } from 'framer-motion';
+import { AnimatePresence, motion } from 'framer-motion';
 import { Sidebar } from '@/components/Sidebar';
 import { ThemeConfigurator } from '@/features/theme/ThemeConfigurator';
 import type { ViewId } from '@/features/nav/navConfig';
@@ -77,14 +77,14 @@ export function AppShell() {
         </div>
 
         {/* 中：搜索条 */}
-        <div className="flex flex-1 justify-center">
+        <div className="flex min-w-0 flex-1 justify-center">
           <div className="glass glass-input flex w-full max-w-sm items-center gap-2 rounded-full px-4 py-1.5">
             <svg viewBox="0 0 24 24" className="h-3.5 w-3.5 shrink-0 text-white/25" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
               <circle cx="11" cy="11" r="7" /><path d="m16.5 16.5 3 3" />
             </svg>
             <input
               placeholder="Search"
-              className="flex-1 bg-transparent text-sm text-white/70 placeholder:text-white/28 focus:outline-none"
+              className="flex-1 min-w-0 bg-transparent text-sm text-white/70 placeholder:text-white/28 focus:outline-none"
             />
           </div>
         </div>
@@ -135,16 +135,23 @@ export function AppShell() {
         </div>
 
         {/* 右：内容区 */}
-        <div className="min-h-0 flex-1 overflow-hidden">
-          {Object.entries(VIEWS).map(([id, View]) => (
-            <div
-              key={id}
-              className={`h-full min-h-0 ${active === id ? 'block' : 'hidden'}`}
-              aria-hidden={active !== id}
-            >
-              <View />
-            </div>
-          ))}
+        <div className="relative min-h-0 flex-1 overflow-hidden">
+          <AnimatePresence mode="wait" initial={false}>
+            {Object.entries(VIEWS).map(([id, View]) =>
+              active === id ? (
+                <motion.div
+                  key={id}
+                  initial={{ opacity: 0, y: 8 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -8 }}
+                  transition={{ type: 'spring', stiffness: 320, damping: 30, mass: 0.8 }}
+                  className="absolute inset-0"
+                >
+                  <View />
+                </motion.div>
+              ) : null
+            )}
+          </AnimatePresence>
         </div>
       </div>
 

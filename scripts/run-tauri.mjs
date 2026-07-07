@@ -1,9 +1,11 @@
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { delimiter, join } from 'node:path';
+import { delimiter, join, resolve } from 'node:path';
 
 const args = process.argv.slice(2);
+
+// 1. 将 ~/.cargo/bin 追加到 PATH（Tauri 的 Rust 工具链需要）
 const cargoBin = join(homedir(), '.cargo', 'bin');
 const pathKey = Object.keys(process.env).find((key) => key.toLowerCase() === 'path') ?? 'PATH';
 const currentPath = process.env[pathKey] ?? '';
@@ -19,9 +21,15 @@ const env = {
   PATH: nextPath,
 };
 
-const child = spawn('tauri', args, {
+// 2. 优先使用本地 node_modules/.bin/tauri（本地 devDependency），回退到全局 tauri
+const localBinDir = resolve('node_modules', '.bin');
+const isWin = process.platform === 'win32';
+const localBin = join(localBinDir, isWin ? 'tauri.cmd' : 'tauri');
+const cmd = existsSync(localBin) ? localBin : 'tauri';
+
+const child = spawn(cmd, args, {
   env,
-  shell: process.platform === 'win32',
+  shell: isWin,
   stdio: 'inherit',
 });
 

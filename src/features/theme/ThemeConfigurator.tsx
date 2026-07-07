@@ -236,7 +236,7 @@ export function ThemeConfigurator({ open, onClose }: { open: boolean; onClose: (
               animate={{ opacity: 1, y: 0, scale: 1 }}
               exit={{ opacity: 0, y: -8, scale: 0.97 }}
               transition={{ type: 'spring', stiffness: 280, damping: 26 }}
-              className="fixed top-10 right-4 z-40 flex max-h-[calc(100vh-56px)] w-[300px] flex-col rounded-2xl
+              className="fixed top-10 right-4 z-40 flex max-h-[calc(100vh-56px)] w-[min(90vw,300px)] flex-col rounded-2xl
                 border border-white/15 bg-neutral-900/95 shadow-2xl shadow-black/50 backdrop-blur-xl"
             >
             {/* 置顶标题行 */}
