@@ -241,7 +241,7 @@ export function ThemeConfigurator({ open, onClose }: { open: boolean; onClose: (
             >
             {/* 置顶标题行 */}
             <div className="sticky top-0 z-10 flex shrink-0 items-center justify-between rounded-t-2xl border-b border-white/[0.07] bg-neutral-900/95 px-5 py-3.5 backdrop-blur-xl">
-              <h3 className="text-sm font-semibold text-white">外观配置</h3>
+              <h3 className="text-sm font-semibold card-title">外观配置</h3>
               <div className="flex items-center gap-2">
                 <button
                   type="button"

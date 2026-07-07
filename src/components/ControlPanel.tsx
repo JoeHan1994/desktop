@@ -63,7 +63,7 @@ export function ControlPanel({
             <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-white/90" />
           </span>
           <div>
-            <h2 className="text-sm font-semibold tracking-wide text-white">
+            <h2 className="text-sm font-semibold tracking-wide card-title">
               向量控制台
             </h2>
             <p className="text-xs text-white/50">Vector Console · 私有向量库</p>

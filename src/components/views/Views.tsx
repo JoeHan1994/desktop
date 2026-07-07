@@ -1,7 +1,8 @@
 'use client';
 
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { AnimatePresence, motion } from 'framer-motion';
+import { createPortal } from 'react-dom';
+import { AnimatePresence, motion, useInView } from 'framer-motion';
 import { GlassCard } from '@/components/ui/GlassCard';
 import { MarkdownContent } from '@/components/ui/MarkdownContent';
 import {
@@ -31,7 +32,7 @@ function PageTitle({
           {stage}
         </span>
       )}
-      <h1 className="text-sm font-semibold tracking-tight text-white">{title}</h1>
+      <h1 className="text-sm font-semibold tracking-tight card-title">{title}</h1>
       {desc && (
         <span className="hidden text-[11px] text-white/30 xl:block">— {desc}</span>
       )}
@@ -52,63 +53,119 @@ function GlassSelect({ value, options, onChange }: {
   onChange: (v: string) => void;
 }) {
   const [open, setOpen] = useState(false);
-  const ref = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const popoverRef = useRef<HTMLDivElement>(null);
+  const [pos, setPos] = useState({ top: 0, left: 0 });
 
   useEffect(() => {
     if (!open) return;
     function handleClick(e: MouseEvent) {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+      const t = e.target as Node;
+      if (!triggerRef.current?.contains(t) && !popoverRef.current?.contains(t)) setOpen(false);
     }
+    function handleScroll() { setOpen(false); }
     document.addEventListener('mousedown', handleClick);
-    return () => document.removeEventListener('mousedown', handleClick);
+    window.addEventListener('scroll', handleScroll, true);
+    return () => {
+      document.removeEventListener('mousedown', handleClick);
+      window.removeEventListener('scroll', handleScroll, true);
+    };
   }, [open]);
 
+  function handleTrigger() {
+    if (!open && triggerRef.current) {
+      const r = triggerRef.current.getBoundingClientRect();
+      const W = 280, H = 220;
+      let left = r.left;
+      let top = r.bottom + 8;
+      if (left + W > window.innerWidth) left = window.innerWidth - W - 8;
+      if (top + H > window.innerHeight) top = r.top - H - 8;
+      setPos({ top, left });
+    }
+    setOpen((o) => !o);
+  }
+
   return (
-    <div ref={ref} className="relative w-full">
+    <div className="relative w-full">
+      {/* 触发器 */}
       <button
+        ref={triggerRef}
         type="button"
-        onClick={() => setOpen((o) => !o)}
-        className="glass glass-input flex w-full items-center justify-between rounded-xl px-3 py-2 text-sm text-white focus:outline-none"
+        onClick={handleTrigger}
+        className={`flex w-full items-center justify-between rounded-xl border px-3 py-2.5 text-sm transition-colors focus:outline-none ${
+          open
+            ? 'border-white/20 bg-white/[0.08]'
+            : 'border-white/10 bg-white/[0.04] hover:border-white/15 hover:bg-white/[0.07]'
+        }`}
       >
-        <span className="truncate">{value}</span>
+        <span className="truncate text-white">{value}</span>
         <svg
           viewBox="0 0 12 12"
-          className={`h-3 w-3 shrink-0 text-white/40 transition-transform duration-200 ${open ? 'rotate-180' : ''}`}
-          fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"
+          className={`ml-2 h-3 w-3 shrink-0 text-white/55 transition-transform duration-200 ${open ? 'rotate-180' : ''}`}
+          fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
         >
           <path d="M2 4l4 4 4-4" />
         </svg>
       </button>
 
+      {/* 二次弹框：通过 createPortal 挂载到 document.body，
+          避免父级 modal 的 CSS transform 破坏 position:fixed 定位 */}
       <AnimatePresence>
-        {open && (
+        {open && createPortal(
           <motion.div
-            initial={{ opacity: 0, y: -4, scaleY: 0.95 }}
-            animate={{ opacity: 1, y: 0, scaleY: 1 }}
-            exit={{ opacity: 0, y: -4, scaleY: 0.95 }}
-            transition={{ duration: 0.15, ease: 'easeOut' }}
-            style={{ transformOrigin: 'top' }}
-            className="glass absolute left-0 right-0 top-[calc(100%+6px)] z-50 overflow-hidden rounded-xl border border-white/[0.1] py-1 shadow-xl shadow-black/50 backdrop-blur-xl"
+            ref={popoverRef}
+            initial={{ opacity: 0, scale: 0.96, y: -6 }}
+            animate={{ opacity: 1, scale: 1, y: 0 }}
+            exit={{ opacity: 0, scale: 0.96, y: -6 }}
+            transition={{ duration: 0.15, ease: [0.16, 1, 0.3, 1] }}
+            style={{ position: 'fixed', top: pos.top, left: pos.left, width: 280, height: 220, zIndex: 9999 }}
+            className="flex flex-col overflow-hidden rounded-2xl border border-white/[0.13] bg-[rgb(14_18_28/0.97)] shadow-2xl shadow-black/70 backdrop-blur-2xl"
           >
-            {options.map((opt) => (
+            {/* 顶部高光 */}
+            <div className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-white/30 to-transparent" />
+
+            {/* 标题栏 */}
+            <div className="flex shrink-0 items-center justify-between border-b border-white/[0.08] px-3.5 py-2.5">
+              <span className="text-[11px] font-semibold card-title">选择模型</span>
               <button
-                key={opt}
                 type="button"
-                onClick={() => { onChange(opt); setOpen(false); }}
-                className={`flex w-full items-center gap-2.5 px-3 py-2 text-left text-sm transition-colors hover:bg-white/[0.07] ${
-                  opt === value ? 'text-white' : 'text-white/55'
-                }`}
+                onClick={() => setOpen(false)}
+                className="flex h-5 w-5 items-center justify-center rounded-full text-white/40 transition-colors hover:bg-white/[0.08] hover:text-white"
               >
-                {opt === value && (
-                  <svg viewBox="0 0 10 10" className="h-2.5 w-2.5 shrink-0 text-emerald-400" fill="currentColor">
-                    <path d="M1.5 5l2.5 2.5 5-5" stroke="currentColor" strokeWidth="1.6" fill="none" strokeLinecap="round" strokeLinejoin="round" />
-                  </svg>
-                )}
-                <span className={`truncate ${opt === value ? '' : 'pl-[18px]'}`}>{opt}</span>
+                <svg viewBox="0 0 10 10" className="h-2.5 w-2.5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
+                  <line x1="2" y1="2" x2="8" y2="8" /><line x1="8" y1="2" x2="2" y2="8" />
+                </svg>
               </button>
-            ))}
+            </div>
+
+            {/* 单选列表 */}
+            <div className="min-h-0 flex-1 overflow-y-auto">
+              {options.map((opt) => {
+                const selected = opt === value;
+                return (
+                  <button
+                    key={opt}
+                    type="button"
+                    onClick={() => { onChange(opt); setOpen(false); }}
+                    className={`flex w-full items-center gap-3 px-3.5 py-2.5 text-left text-sm transition-colors ${
+                      selected
+                        ? 'bg-white/[0.07] text-white'
+                        : 'text-white/60 hover:bg-white/[0.04] hover:text-white/90'
+                    }`}
+                  >
+                    {/* 单选圆圈 */}
+                    <span className={`flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-full border transition-colors ${
+                      selected ? 'border-sky-400' : 'border-white/25'
+                    }`}>
+                      {selected && <span className="h-1.5 w-1.5 rounded-full bg-sky-400" />}
+                    </span>
+                    <span className="truncate">{opt}</span>
+                  </button>
+                );
+              })}
+            </div>
           </motion.div>
-        )}
+        , document.body)}
       </AnimatePresence>
     </div>
   );
@@ -250,7 +307,7 @@ function ProviderModal({
           {/* 标题栏 */}
           <div className="flex items-center justify-between border-b border-white/[0.08] px-6 py-4">
             <div>
-              <h2 className="text-sm font-semibold text-white">{isEditing ? '编辑 Model Provider' : '添加 Model Provider'}</h2>
+              <h2 className="text-sm font-semibold card-title">{isEditing ? '编辑 Model Provider' : '添加 Model Provider'}</h2>
               <p className="mt-0.5 text-[11px] text-white/35">{isEditing ? '修改模型接入配置' : '配置模型接入信息'}</p>
             </div>
             <button
@@ -416,13 +473,16 @@ function ProviderRow({
   onEdit: () => void;
   onDelete: () => void;
 }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const inView = useInView(ref, { amount: 0.5, triggerOnce: false });
   const meta = PROVIDER_META[provider.provider];
   return (
     <motion.div
-      initial={{ opacity: 0, y: 10 }}
-      animate={{ opacity: 1, y: 0 }}
+      ref={ref}
+      initial={{ scale: 0.7, opacity: 0 }}
+      animate={inView ? { scale: 1, opacity: 1 } : { scale: 0.7, opacity: 0 }}
       exit={{ opacity: 0, x: -16 }}
-      transition={{ delay: index * 0.05, type: 'spring', stiffness: 200 }}
+      transition={{ duration: 0.2, delay: 0.1 }}
       className="glass app-card app-card-control glass-control flex items-center gap-4 rounded-2xl px-4 py-3.5"
     >
       {/* 左：provider 标识色竖条 */}
@@ -431,7 +491,7 @@ function ProviderRow({
       {/* 中：主要信息 */}
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2">
-          <span className="truncate text-sm font-semibold text-white">{provider.name}</span>
+          <span className="truncate text-sm font-semibold card-title">{provider.name}</span>
           <span
             className="glass glass-chip shrink-0 px-2 py-0.5 text-[10px] font-medium"
             style={{ color: meta.color }}
@@ -619,7 +679,7 @@ function ModelSelector({
   if (providers.length === 0) {
     return (
       <div className="glass app-card rounded-xl p-3.5 space-y-2">
-        <div className="card-label">Model</div>
+        <div className="text-sm font-semibold card-title">Model</div>
         <div className="flex flex-col items-center gap-2 py-3 text-center">
           <svg viewBox="0 0 24 24" className="h-6 w-6 text-white/20" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round">
             <rect x="2" y="3" width="20" height="14" rx="2" />
@@ -638,7 +698,7 @@ function ModelSelector({
 
   return (
     <div className="glass app-card rounded-xl p-3.5 space-y-2.5">
-      <div className="card-label">Model</div>
+      <div className="text-sm font-semibold card-title">Model</div>
 
       {/* Current model pill / trigger */}
       <button
@@ -778,7 +838,7 @@ function TokenViz({
 
   return (
     <div className="glass app-card rounded-xl p-3.5 space-y-3">
-      <div className="card-label">Tokens</div>
+      <div className="text-sm font-semibold card-title">Tokens</div>
 
       {/* 三行横条（Input/Output 对最大値归一，Total 对 ctxLimit） */}
       <div className="space-y-2.5">
@@ -1204,12 +1264,18 @@ function RagScoreBar({ value, color }: { value: number; color: string }) {
 }
 
 function RagSourceCard({ source, active, onSelect }: { source: RagSource; active: boolean; onSelect: () => void }) {
+  const ref = useRef<HTMLButtonElement>(null);
+  const inView = useInView(ref, { amount: 0.5, triggerOnce: false });
   const color = source.score > 0.9 ? '#34d399' : source.score > 0.84 ? '#60a5fa' : '#fbbf24';
 
   return (
     <motion.button
+      ref={ref}
       type="button"
       onClick={onSelect}
+      initial={{ scale: 0.7, opacity: 0 }}
+      animate={inView ? { scale: 1, opacity: 1 } : { scale: 0.7, opacity: 0 }}
+      transition={{ duration: 0.2, delay: 0.1 }}
       whileHover={{ y: -1 }}
       className={`glass app-card app-card-control glass-control w-full rounded-2xl p-3.5 text-left transition-colors ${
         active ? 'text-white' : 'text-white/70 hover:text-white/90'
@@ -1220,7 +1286,7 @@ function RagSourceCard({ source, active, onSelect }: { source: RagSource; active
         <div className="min-w-0">
           <div className="flex items-center gap-2">
             <span className="glass glass-chip shrink-0 px-2 py-0.5 text-[10px] font-semibold text-white/45">{source.id}</span>
-            <span className="truncate text-sm font-semibold text-white">{source.title}</span>
+            <span className="truncate text-sm font-semibold card-title">{source.title}</span>
           </div>
           <div className="mt-1 flex items-center gap-2 text-[10px] text-white/30">
             <span className="truncate">{source.origin}</span>
@@ -1250,16 +1316,6 @@ function RagSourceCard({ source, active, onSelect }: { source: RagSource; active
 }
 
 export function RagView() {
-  const [query, setQuery] = useState('如何让 RAG 回答带上可靠引用？');
-  const [mode, setMode] = useState<RagMode>('hybrid');
-  const [activeSourceId, setActiveSourceId] = useState(RAG_SOURCES[0].id);
-  const activeSource = RAG_SOURCES.find((source) => source.id === activeSourceId) ?? RAG_SOURCES[0];
-  const modeCopy: Record<RagMode, { label: string; desc: string }> = {
-    hybrid: { label: 'Hybrid', desc: '向量 + 关键词' },
-    vector: { label: 'Vector', desc: '语义召回优先' },
-    keyword: { label: 'Keyword', desc: '精确词匹配' },
-  };
-
   return (
     <div className="flex h-full min-h-0 flex-col gap-3 overflow-hidden">
       <div className="flex shrink-0 items-center justify-between gap-3">
@@ -1268,176 +1324,6 @@ export function RagView() {
           title="RAG Workspace"
           desc="设计检索、重排与引用校验流程"
         />
-        <div className="glass glass-control hidden items-center gap-1 rounded-full p-1 md:flex">
-          {(Object.keys(modeCopy) as RagMode[]).map((item) => (
-            <button
-              key={item}
-              type="button"
-              onClick={() => setMode(item)}
-              className={`rounded-full px-3 py-1 text-[11px] font-medium transition-colors ${
-                mode === item ? 'bg-white/12 text-white' : 'text-white/35 hover:text-white/65'
-              }`}
-            >
-              {modeCopy[item].label}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      <div className="grid min-h-0 flex-1 grid-cols-1 gap-3 lg:grid-cols-[minmax(0,1.35fr)_minmax(280px,0.75fr)]">
-        <div className="flex min-h-0 flex-col gap-3 overflow-hidden">
-          <div className="glass glass-input shrink-0 rounded-2xl p-3.5">
-            <div className="mb-2 flex items-center justify-between gap-2">
-              <span className="card-label">Query Composer</span>
-              <span className="glass glass-chip px-2 py-0.5 text-[10px] text-white/35">{modeCopy[mode].desc}</span>
-            </div>
-            <div className="flex items-end gap-2">
-              <textarea
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-                rows={3}
-                className="min-h-[84px] flex-1 resize-none bg-transparent text-sm leading-relaxed text-white placeholder:text-white/25 focus:outline-none"
-                placeholder="输入一个需要检索增强的问题"
-              />
-              <button
-                type="button"
-                title="预览检索"
-                className="glass glass-icon-button glass-control h-9 w-9 shrink-0 rounded-xl text-white"
-              >
-                <svg viewBox="0 0 14 14" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
-                  <circle cx="6" cy="6" r="4" /><path d="m9.2 9.2 3 3" />
-                </svg>
-              </button>
-            </div>
-          </div>
-
-          <div className="grid shrink-0 grid-cols-2 gap-3 lg:grid-cols-4">
-            {RAG_STEPS.map((step) => (
-              <div key={step.label} className="glass app-card rounded-2xl p-3">
-                <div className="flex items-center justify-between gap-2">
-                  <span className="card-label">{step.label}</span>
-                  <span className="h-2 w-2 rounded-full" style={{ backgroundColor: step.color }} />
-                </div>
-                <div className="mt-2 text-sm font-semibold text-white">{step.value}</div>
-                <div className="mt-2">
-                  <RagScoreBar value={step.pct / 100} color={step.color} />
-                </div>
-              </div>
-            ))}
-          </div>
-
-          <div className="grid min-h-0 flex-1 grid-cols-1 gap-3 lg:grid-cols-[minmax(0,0.95fr)_minmax(0,1.05fr)]">
-            <div className="flex min-h-0 flex-col gap-2 overflow-hidden">
-              <div className="flex shrink-0 items-center justify-between px-1">
-                <span className="card-label">Retrieved Sources</span>
-                <span className="text-[10px] text-white/25">Top 3 / mock</span>
-              </div>
-              <div className="min-h-0 space-y-2 overflow-y-auto pr-1">
-                {RAG_SOURCES.map((source) => (
-                  <RagSourceCard
-                    key={source.id}
-                    source={source}
-                    active={source.id === activeSource.id}
-                    onSelect={() => setActiveSourceId(source.id)}
-                  />
-                ))}
-              </div>
-            </div>
-
-            <div className="glass app-card flex min-h-0 flex-col overflow-hidden rounded-2xl">
-              <div className="flex shrink-0 items-center justify-between border-b border-white/[0.08] px-4 py-3">
-                <div className="min-w-0">
-                  <div className="card-label">Grounded Answer Preview</div>
-                  <div className="mt-1 truncate text-sm font-semibold text-white">{activeSource.title}</div>
-                </div>
-                <span className="glass glass-chip shrink-0 px-2 py-0.5 text-[10px] text-emerald-300/80">Cited</span>
-              </div>
-              <div className="min-h-0 flex-1 overflow-y-auto p-4">
-                <div className="space-y-3 text-sm leading-relaxed text-white/70">
-                  <p>
-                    RAG 回答页会先展示命中的上下文，再把引用片段折叠进回答草稿。当前选中的资料片段建议作为主引用，
-                    同时保留来源、分数和 token 开销，方便后续接入真实检索链路。
-                  </p>
-                  <div className="app-card-surface rounded-xl p-3">
-                    <div className="mb-2 flex items-center justify-between gap-2">
-                      <span className="card-label">Selected Context</span>
-                      <span className="text-[10px] tabular-nums text-white/30">score {activeSource.score.toFixed(2)}</span>
-                    </div>
-                    <p className="text-[12px] leading-relaxed text-white/55">{activeSource.excerpt}</p>
-                  </div>
-                  <div className="grid grid-cols-3 gap-2">
-                    <div className="app-card-surface rounded-xl p-3">
-                      <div className="text-[10px] text-white/35">Coverage</div>
-                      <div className="mt-1 text-lg font-bold tabular-nums text-emerald-300">86%</div>
-                    </div>
-                    <div className="app-card-surface rounded-xl p-3">
-                      <div className="text-[10px] text-white/35">Latency</div>
-                      <div className="mt-1 text-lg font-bold tabular-nums text-sky-300">128ms</div>
-                    </div>
-                    <div className="app-card-surface rounded-xl p-3">
-                      <div className="text-[10px] text-white/35">Context</div>
-                      <div className="mt-1 text-lg font-bold tabular-nums text-violet-300">1.1k</div>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div className="flex min-h-0 flex-col gap-3 overflow-y-auto">
-          <GlassCard title="Retrieval Settings" subtitle="frontend draft" className="rounded-2xl">
-            <div className="space-y-3">
-              <div className="grid grid-cols-2 gap-2">
-                <div className="app-card-surface rounded-xl p-3">
-                  <div className="text-[10px] text-white/35">Top-K</div>
-                  <div className="mt-1 text-xl font-bold tabular-nums text-white">8</div>
-                </div>
-                <div className="app-card-surface rounded-xl p-3">
-                  <div className="text-[10px] text-white/35">Threshold</div>
-                  <div className="mt-1 text-xl font-bold tabular-nums text-white">0.72</div>
-                </div>
-              </div>
-              {[
-                { label: 'Chunk overlap', value: 18, color: '#60a5fa' },
-                { label: 'Rerank weight', value: 72, color: '#a78bfa' },
-                { label: 'Citation guard', value: 86, color: '#34d399' },
-              ].map((item) => (
-                <div key={item.label}>
-                  <div className="mb-1 flex items-center justify-between text-[10px]">
-                    <span className="text-white/35">{item.label}</span>
-                    <span className="tabular-nums text-white/45">{item.value}%</span>
-                  </div>
-                  <RagScoreBar value={item.value / 100} color={item.color} />
-                </div>
-              ))}
-            </div>
-          </GlassCard>
-
-          <GlassCard title="Prompt Contract" subtitle="answer constraints" className="rounded-2xl">
-            <div className="space-y-2 text-[12px] leading-relaxed text-white/50">
-              <div className="app-card-surface rounded-xl p-3">必须优先回答已检索上下文能支撑的内容。</div>
-              <div className="app-card-surface rounded-xl p-3">每个关键结论至少关联一个 source id。</div>
-              <div className="app-card-surface rounded-xl p-3">当召回分数低于阈值时，提示需要补充资料。</div>
-            </div>
-          </GlassCard>
-
-          <GlassCard title="Index Health" subtitle="local preview" className="rounded-2xl">
-            <div className="space-y-3">
-              {[
-                ['Documents', '1,284'],
-                ['Chunks', '18,920'],
-                ['Embeddings', '18,907'],
-                ['Stale files', '13'],
-              ].map(([label, value]) => (
-                <div key={label} className="flex items-center justify-between text-sm">
-                  <span className="text-white/40">{label}</span>
-                  <span className="font-semibold tabular-nums text-white/80">{value}</span>
-                </div>
-              ))}
-            </div>
-          </GlassCard>
-        </div>
       </div>
     </div>
   );
@@ -1572,11 +1458,17 @@ function KbVectorHeatmap() {
 }
 
 function KbChunkCard({ chunk, active, onSelect }: { chunk: KbChunk; active: boolean; onSelect: () => void }) {
+  const ref = useRef<HTMLButtonElement>(null);
+  const inView = useInView(ref, { amount: 0.5, triggerOnce: false });
   const tokenPct = (chunk.tokens / KB_TOKEN_LIMIT) * 100;
   return (
-    <button
+    <motion.button
+      ref={ref}
       type="button"
       onClick={onSelect}
+      initial={{ scale: 0.7, opacity: 0 }}
+      animate={inView ? { scale: 1, opacity: 1 } : { scale: 0.7, opacity: 0 }}
+      transition={{ duration: 0.2, delay: 0.1 }}
       className={`glass app-card app-card-control glass-control w-full rounded-2xl p-3 text-left ${active ? 'text-white' : 'text-white/65 hover:text-white/85'}`}
       style={active ? { borderColor: 'rgb(var(--accent-rgb) / calc(var(--glass-border-alpha) * 1.8))', backgroundColor: 'rgb(var(--accent-rgb) / calc(var(--glass-alpha) * 0.7))' } : undefined}
     >
@@ -1584,7 +1476,7 @@ function KbChunkCard({ chunk, active, onSelect }: { chunk: KbChunk; active: bool
         <div className="min-w-0">
           <div className="flex items-center gap-2">
             <span className="glass glass-chip px-2 py-0.5 text-[10px] text-white/45">#{chunk.index}</span>
-            <span className="truncate text-sm font-semibold text-white">{chunk.title}</span>
+            <span className="truncate text-sm font-semibold card-title">{chunk.title}</span>
           </div>
           <p className="mt-2 line-clamp-2 text-[12px] leading-relaxed text-white/45">{chunk.text}</p>
         </div>
@@ -1600,20 +1492,26 @@ function KbChunkCard({ chunk, active, onSelect }: { chunk: KbChunk; active: bool
           ))}
         </div>
       </div>
-    </button>
+    </motion.button>
   );
 }
 
 function KbFileCard({ file, active, onSelect }: { file: KbFileRecord; active: boolean; onSelect: () => void }) {
+  const ref = useRef<HTMLButtonElement>(null);
+  const inView = useInView(ref, { amount: 0.5, triggerOnce: false });
   const completed = file.status === 'completed';
   const totalTokens = file.chunks.reduce((sum, chunk) => sum + chunk.tokens, 0);
   const progress = completed ? 100 : 46;
 
   return (
-    <button
+    <motion.button
+      ref={ref}
       type="button"
       onClick={onSelect}
       disabled={!completed}
+      initial={{ scale: 0.7, opacity: 0 }}
+      animate={inView ? { scale: 1, opacity: 1 } : { scale: 0.7, opacity: 0 }}
+      transition={{ duration: 0.2, delay: 0.1 }}
       className={`glass app-card app-card-control glass-control w-full rounded-2xl p-3 text-left ${
         active ? 'text-white' : completed ? 'text-white/70 hover:text-white/90' : 'cursor-wait text-white/42'
       }`}
@@ -1621,7 +1519,7 @@ function KbFileCard({ file, active, onSelect }: { file: KbFileRecord; active: bo
     >
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <div className="truncate text-sm font-semibold text-white">{file.name}</div>
+          <div className="truncate text-sm font-semibold card-title">{file.name}</div>
           <div className="mt-1 text-[10px] uppercase tracking-wide text-white/30">{file.format} · {formatKbFileSize(file.size)}</div>
         </div>
         <span className={`glass-chip shrink-0 border px-2 py-0.5 text-[10px] ${completed ? 'glass-status-success text-emerald-300/80' : 'glass-status-warning text-amber-300/80'}`}>
@@ -1643,14 +1541,12 @@ function KbFileCard({ file, active, onSelect }: { file: KbFileRecord; active: bo
       <div className="mt-3">
         <KbProgressBar value={progress} color={completed ? '#34d399' : '#fbbf24'} />
       </div>
-    </button>
+    </motion.button>
   );
 }
 
 export function KnowledgeBaseManagerView() {
   const [files, setFiles] = useState<KbFileRecord[]>(KB_INITIAL_FILES);
-  const [selectedFileId, setSelectedFileId] = useState(KB_INITIAL_FILES[0].id);
-  const [selectedChunkId, setSelectedChunkId] = useState(KB_INITIAL_FILES[0].chunks[0].id);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -1665,15 +1561,6 @@ export function KnowledgeBaseManagerView() {
 
     return () => timers.forEach((timer) => window.clearTimeout(timer));
   }, [files]);
-
-  const selectedFile = files.find((file) => file.id === selectedFileId) ?? files[0];
-  const selectedChunk = selectedFile.chunks.find((chunk) => chunk.id === selectedChunkId) ?? selectedFile.chunks[0];
-  const tokenPct = (selectedChunk.tokens / KB_TOKEN_LIMIT) * 100;
-  const isTruncated = selectedChunk.tokens > KB_TOKEN_LIMIT;
-  const completedChunks = Math.max(0, selectedFile.chunks.length - 4);
-  const processingChunks = Math.min(4, selectedFile.chunks.length);
-  const waitingChunks = Math.max(0, selectedFile.chunks.length - completedChunks - processingChunks);
-  const reqSizeKb = (selectedChunk.tokens * 2.8 / 1024).toFixed(1);
 
   function addFiles(fileList: FileList | null) {
     if (!fileList) return;
@@ -1694,14 +1581,6 @@ export function KnowledgeBaseManagerView() {
 
     if (incomingFiles.length === 0) return;
     setFiles((previousFiles) => [...incomingFiles, ...previousFiles]);
-    setSelectedFileId(incomingFiles[0].id);
-    setSelectedChunkId(incomingFiles[0].chunks[0].id);
-  }
-
-  function selectFile(file: KbFileRecord) {
-    if (file.status !== 'completed') return;
-    setSelectedFileId(file.id);
-    setSelectedChunkId(file.chunks[0].id);
   }
 
   return (
@@ -1723,196 +1602,23 @@ export function KnowledgeBaseManagerView() {
         onChange={(event) => addFiles(event.target.files)}
       />
 
-      <div className="grid min-h-0 flex-1 grid-cols-1 gap-3 lg:grid-cols-12">
-        <div className="flex min-h-0 flex-col gap-3 overflow-hidden lg:col-span-3">
-          <div
-            role="button"
-            tabIndex={0}
-            onClick={() => fileInputRef.current?.click()}
-            onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') fileInputRef.current?.click(); }}
-            className="glass app-card app-card-control glass-control shrink-0 cursor-pointer rounded-2xl p-3 text-white/60"
-          >
-            <div className="flex items-start gap-3">
-              <div className="glass-icon-button app-card-surface glass-control flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl">
-                <svg viewBox="0 0 14 14" className="h-4 w-4 text-white/45" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M7 10V2" /><path d="M3.5 5.5 7 2l3.5 3.5" /><path d="M2 10v1.5h10V10" />
-                </svg>
-              </div>
-              <div className="min-w-0">
-                <div className="text-sm font-semibold text-white">上传文件</div>
-                <div className="mt-1 text-[11px] leading-relaxed text-white/35">支持 PDF / Excel / Word / CSV / Markdown / TXT，解析完成后进入 Chunk 审核。</div>
-              </div>
-            </div>
+      <div
+        role="button"
+        tabIndex={0}
+        onClick={() => fileInputRef.current?.click()}
+        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') fileInputRef.current?.click(); }}
+        className="glass app-card app-card-control glass-control shrink-0 cursor-pointer rounded-2xl p-3 text-white/60"
+      >
+        <div className="flex items-start gap-3">
+          <div className="glass-icon-button app-card-surface glass-control flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl">
+            <svg viewBox="0 0 14 14" className="h-4 w-4 text-white/45" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M7 10V2" /><path d="M3.5 5.5 7 2l3.5 3.5" /><path d="M2 10v1.5h10V10" />
+            </svg>
           </div>
-
-          <div className="glass app-card flex min-h-0 flex-col overflow-hidden rounded-2xl p-3">
-            <div className="mb-3 flex shrink-0 items-center justify-between gap-2">
-              <div>
-                <div className="card-label">Files</div>
-                <div className="mt-1 text-sm font-semibold text-white">上传与解析状态</div>
-              </div>
-              <span className="glass-chip app-card-surface px-2 py-0.5 text-[10px] text-white/35">{files.length} files</span>
-            </div>
-            <div className="min-h-0 space-y-2 overflow-y-auto pr-1">
-              {files.map((file) => (
-                <KbFileCard
-                  key={file.id}
-                  file={file}
-                  active={file.id === selectedFile.id}
-                  onSelect={() => selectFile(file)}
-                />
-              ))}
-            </div>
+          <div className="min-w-0">
+            <div className="text-sm font-semibold card-title">上传文件</div>
+            <div className="mt-1 text-[11px] leading-relaxed text-white/35">支持 PDF / Excel / Word / CSV / Markdown / TXT，解析完成后进入 Chunk 审核。</div>
           </div>
-        </div>
-
-        <div className="flex min-h-0 flex-col gap-3 overflow-hidden lg:col-span-5">
-          <div className="glass app-card shrink-0 rounded-2xl p-3.5">
-            <div className="flex items-start justify-between gap-3">
-              <div className="min-w-0">
-                <div className="card-label">Chunk Viewer</div>
-                <div className="mt-1 truncate text-sm font-semibold text-white">{selectedFile.name}</div>
-              </div>
-              <div className="glass-chip app-card-surface shrink-0 px-2.5 py-1 text-[11px] text-white/45">
-                Rust chunks: <span className="font-semibold text-white">{selectedFile.chunks.length}</span>
-              </div>
-            </div>
-
-            <div className="mt-3 grid grid-cols-3 gap-2">
-              <div className="app-card-surface rounded-xl p-2.5">
-                <div className="text-[9px] uppercase text-white/30">Chars</div>
-                <div className="mt-1 text-base font-bold tabular-nums text-white">{selectedChunk.chars}</div>
-              </div>
-              <div className="app-card-surface rounded-xl p-2.5">
-                <div className="text-[9px] uppercase text-white/30">Tokens</div>
-                <div className="mt-1 text-base font-bold tabular-nums text-white">{selectedChunk.tokens}</div>
-              </div>
-              <div className="app-card-surface rounded-xl p-2.5">
-                <div className="text-[9px] uppercase text-white/30">Limit</div>
-                <div className="mt-1 text-base font-bold tabular-nums text-emerald-300">{Math.round(tokenPct)}%</div>
-              </div>
-            </div>
-
-            <div className="app-card-surface mt-3 rounded-xl p-3">
-              <div className="mb-2 flex items-center justify-between gap-2">
-                <span className="card-label">Metadata Audit</span>
-                <span className="glass-chip glass-status-success border px-2 py-0.5 text-[10px] text-emerald-300/80">bound</span>
-              </div>
-              <div className="flex flex-wrap gap-1.5">
-                {Object.entries(selectedChunk.metadata).map(([key, value]) => (
-                  <span key={key} className="glass-chip app-card-surface px-2 py-0.5 text-[10px] text-white/50">
-                    {key}: {value}
-                  </span>
-                ))}
-              </div>
-            </div>
-          </div>
-
-          <div className="min-h-0 space-y-2 overflow-y-auto pr-1">
-            {selectedFile.chunks.map((chunk) => (
-              <KbChunkCard
-                key={chunk.id}
-                chunk={chunk}
-                active={chunk.id === selectedChunk.id}
-                onSelect={() => setSelectedChunkId(chunk.id)}
-              />
-            ))}
-          </div>
-        </div>
-
-        <div className="glass app-card flex min-h-0 flex-col overflow-hidden rounded-2xl p-3.5 lg:col-span-4">
-          <div className="mb-3 flex shrink-0 items-start justify-between gap-3">
-            <div>
-              <div className="text-sm font-semibold text-white">Vectorization Pipeline</div>
-              <div className="mt-0.5 card-label">bge-m3 local preview</div>
-            </div>
-            <span className="glass-chip app-card-surface px-2 py-0.5 text-[10px] text-white/35">5 stages</span>
-          </div>
-
-            <button
-              type="button"
-              className="glass-button glass-action-success glass-control mb-3 w-full shrink-0 rounded-xl border px-3 py-2 text-sm font-semibold text-emerald-300"
-            >
-              <svg viewBox="0 0 14 14" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M3 2.5 11 7 3 11.5z" />
-              </svg>
-              触发向量化
-            </button>
-
-            <div className="min-h-0 space-y-2 overflow-y-auto pr-1">
-              <div className="app-card-surface rounded-xl p-2.5">
-                <div className="flex items-center justify-between gap-2">
-                  <span className="card-label">Stage 1 · Tokenization</span>
-                  <span className={`text-[10px] ${isTruncated ? 'text-rose-300' : 'text-emerald-300/80'}`}>{isTruncated ? '自动截断' : '安全'}</span>
-                </div>
-                <div className="mt-2 text-[12px] text-white/55">
-                  原始文本：{selectedChunk.chars} 字 -&gt; 预估 Token：{selectedChunk.tokens}
-                </div>
-                <div className="mt-2">
-                  <KbProgressBar value={tokenPct} color={isTruncated ? '#f87171' : tokenPct > 70 ? '#fbbf24' : '#34d399'} />
-                </div>
-                <div className="mt-1 text-right text-[10px] tabular-nums text-white/30">{selectedChunk.tokens} / {KB_TOKEN_LIMIT}</div>
-              </div>
-
-              <div className="app-card-surface rounded-xl p-2.5">
-                <div className="card-label">Stage 2 · Batching Queue</div>
-                <div className="mt-2 grid grid-cols-4 gap-1.5">
-                  {Array.from({ length: 4 }, (_, index) => (
-                    <div key={index} className="app-card-surface rounded-xl p-2 text-center">
-                      <div className="text-[9px] text-white/30">Pipe {index + 1}</div>
-                      <div className="glass-pipe-active mt-1 h-8 rounded-lg" />
-                    </div>
-                  ))}
-                </div>
-                <div className="mt-3 text-[11px] text-white/45">
-                  [ 已完成: {completedChunks} | 正在处理: {processingChunks} | 队列等待: {waitingChunks} ]
-                </div>
-              </div>
-
-              <div className="app-card-surface rounded-xl p-2.5">
-                <div className="card-label">Stage 3 · API Payload & Compute</div>
-                <div className="mt-3 grid grid-cols-3 gap-2">
-                  {[
-                    ['Req Size', `${reqSizeKb}KB`, '#60a5fa'],
-                    ['CPU', '64%', '#fbbf24'],
-                    ['GPU VRAM', '5.8GB', '#a78bfa'],
-                  ].map(([label, value, color]) => (
-                    <div key={label} className="app-card-surface rounded-xl p-2">
-                      <div className="text-[9px] text-white/30">{label}</div>
-                      <div className="mt-1 text-sm font-bold tabular-nums" style={{ color }}>{value}</div>
-                    </div>
-                  ))}
-                </div>
-                <div className="mt-2 text-[11px] text-white/40">POST http://localhost:11434 · Ollama Response: 45ms</div>
-              </div>
-
-              <div className="app-card-surface rounded-xl p-2.5">
-                <div className="flex items-center justify-between gap-2">
-                  <span className="card-label">Stage 4 · Vector L2 Norm</span>
-                  <span className="glass-chip glass-status-success border px-2 py-0.5 text-[10px] text-emerald-300/80">L2 Normalize Success</span>
-                </div>
-                <div className="mt-3">
-                  <KbVectorHeatmap />
-                </div>
-                <div className="mt-2 text-[11px] text-white/40">1024-d Vec&lt;f32&gt; -&gt; unit vector, ready for dot product search.</div>
-              </div>
-
-              <div className="app-card-surface rounded-xl p-2.5">
-                <div className="flex items-center justify-between gap-2">
-                  <span className="card-label">Stage 5 · Upsert & Indexing</span>
-                  <span className="flex items-center gap-1 text-[10px] text-emerald-300/80">
-                    <svg viewBox="0 0 12 12" className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-                      <path d="M2 6.5 4.8 9 10 3" />
-                    </svg>
-                    Success
-                  </span>
-                </div>
-                <div className="app-card-surface mt-2 rounded-xl p-3 font-mono text-[11px] leading-relaxed text-white/55">
-                  Insert ID: doc_chunk_{String(selectedChunk.index).padStart(2, '0')}<br />
-                  &quot;source&quot;: &quot;{selectedFile.name}&quot;, &quot;page&quot;: &quot;{selectedChunk.metadata.页码}&quot; 已强绑定入库
-                </div>
-              </div>
-            </div>
         </div>
       </div>
     </div>

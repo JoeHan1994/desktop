@@ -52,7 +52,7 @@ export function GlassCard({
           <div className="mb-4 flex items-start justify-between gap-3">
             <div>
               {title && (
-                <h3 className="text-sm font-semibold tracking-wide text-white">
+                <h3 className="text-sm font-semibold tracking-wide card-title">
                   {title}
                 </h3>
               )}

@@ -157,10 +157,7 @@ body {
   .glass-input:focus-within {
     outline: none;
     border-color: rgb(255 255 255 / calc(var(--glass-border-alpha) + 0.18));
-    box-shadow:
-      0 0 0 1px rgb(255 255 255 / 0.18),
-      0 0 0 4px rgb(var(--accent-rgb) / 0.14),
-      0 20px 45px -12px rgb(0 0 0 / calc(0.5 * var(--shadow-strength)));
+    box-shadow: 0 20px 45px -12px rgb(0 0 0 / calc(0.5 * var(--shadow-strength)));
   }
 
   .glass-input {
@@ -213,6 +210,20 @@ body {
     line-height: 1.3;
   }
 
+  /**
+   * 全局卡片标题样式：动态渐变文字
+   * 使用 background-clip: text 实现渐变，动画平滑循环移位。
+   * 只应用于卡片 / 面板的主标题，size 保持原有设定。
+   */
+  .card-title {
+    background-image: linear-gradient(to right, #5227FF, #FF9FFC, #B497CF, #5227FF);
+    background-size: 300% 100%;
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    animation: card-title-gradient 16s ease-in-out infinite;
+  }
+
   .glass-track {
     background-color: rgb(var(--glass-rgb) / calc(var(--glass-alpha) + 0.02));
     border: 1px solid rgb(255 255 255 / var(--glass-border-alpha));
@@ -261,6 +272,13 @@ body {
   50% {
     opacity: 0.9;
   }
+}
+
+/* 卡片标题渐变动画：yoyo 平滑小摩 */
+@keyframes card-title-gradient {
+  0%   { background-position: 0% 50%; }
+  50%  { background-position: 100% 50%; }
+  100% { background-position: 0% 50%; }
 }
 
 @media (prefers-reduced-motion: reduce) {
