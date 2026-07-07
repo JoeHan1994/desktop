@@ -2,6 +2,7 @@
 
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/tauri';
+import { listen } from '@tauri-apps/api/event';
 import { motion, AnimatePresence } from 'framer-motion';
 import { GlassCard } from '@/components/ui/GlassCard';
 
@@ -195,7 +196,7 @@ export function RemoteMachineView() {
   const [saving, setSaving] = useState(false);
   const [saveMsg, setSaveMsg] = useState('');
   const [autoRefresh, setAutoRefresh] = useState(false);
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const unlistenRef = useRef<(() => void) | null>(null);
   const isDirty = useRef(false);
   const saveMsgTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -235,7 +236,8 @@ export function RemoteMachineView() {
   }
 
   async function handleDisconnect() {
-    stopPolling();
+    stopListening();
+    if (selectedFile) await invoke('ssh_unwatch_file', { path: selectedFile }).catch(() => {});
     try { await invoke('ssh_disconnect'); } catch { /* ignore */ }
     setConnStatus('idle');
     setDiskRoots([]);
@@ -329,19 +331,36 @@ export function RemoteMachineView() {
     if (!isDirty.current) setEditorDraft(fileContent);
   }, [fileContent]);
 
-  function startPolling(path: string) {
-    stopPolling();
-    pollRef.current = setInterval(() => loadFile(path, true), 3000);
+  // ── 实时监视（基于 Tauri 事件，不再轮询）──────────────────────────────────
+
+  /** 停止前端事件监听器（同步）。 */
+  function stopListening() {
+    if (unlistenRef.current) { unlistenRef.current(); unlistenRef.current = null; }
   }
 
-  function stopPolling() {
-    if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
+  /** 启动实时监视：先注册 Tauri 事件监听器，再启动后端监视任务。 */
+  async function startWatching(path: string) {
+    stopListening();
+    const unlisten = await listen<{ path: string; content: string }>('file-changed', (e) => {
+      if (e.payload.path === path) setFileContent(e.payload.content);
+    });
+    unlistenRef.current = unlisten;
+    await invoke('ssh_watch_file', { path });
   }
 
+  // autoRefresh 开关或切换文件时自动启停监视
   useEffect(() => {
-    if (autoRefresh && selectedFile) startPolling(selectedFile);
-    else stopPolling();
-    return stopPolling;
+    if (autoRefresh && selectedFile) {
+      const path = selectedFile;
+      void startWatching(path);
+    } else {
+      stopListening();
+      if (selectedFile) void invoke('ssh_unwatch_file', { path: selectedFile }).catch(() => {});
+    }
+    return () => {
+      stopListening();
+      if (selectedFile) void invoke('ssh_unwatch_file', { path: selectedFile }).catch(() => {});
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [autoRefresh, selectedFile]);
 
@@ -585,15 +604,11 @@ export function RemoteMachineView() {
                   className={`flex shrink-0 items-center gap-1.5 rounded-lg px-2.5 py-1
                     text-[11px] transition-colors
                     ${autoRefresh
-                      ? 'bg-sky-500/15 text-sky-400'
+                      ? 'bg-emerald-500/15 text-emerald-400'
                       : 'bg-white/[0.04] text-white/35 hover:text-white/65'}`}
                 >
-                  <svg viewBox="0 0 24 24" className={`h-3 w-3 ${autoRefresh ? 'animate-spin' : ''}`}
-                    fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round">
-                    <path d="M23 4v6h-6M1 20v-6h6" />
-                    <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
-                  </svg>
-                  自动刷新
+                  <span className={`h-1.5 w-1.5 rounded-full ${autoRefresh ? 'bg-emerald-400 animate-pulse' : 'bg-white/20'}`} />
+                  {autoRefresh ? '监视中' : '实时监视'}
                 </button>
 
                 {/* 手动刷新 */}

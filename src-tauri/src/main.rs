@@ -69,6 +69,8 @@ fn main() {
             remote::ssh_list_dir,
             remote::ssh_read_file,
             remote::ssh_write_file,
+            remote::ssh_watch_file,
+            remote::ssh_unwatch_file,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -10,7 +10,9 @@ use russh::ChannelMsg;
 use russh_keys::key::PublicKey;
 use russh_sftp::client::SftpSession;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::Arc;
+use tauri::Manager;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Mutex;
 
@@ -34,7 +36,9 @@ impl client::Handler for SshHandler {
 // ── 状态 ──────────────────────────────────────────────────────────────────
 
 pub(crate) struct SshConn {
-    handle: Handle<SshHandler>,
+    handle: Arc<Handle<SshHandler>>,
+    /// path → 取消令牌发送端；drop 即取消对应监视任务
+    watchers: HashMap<String, tokio::sync::oneshot::Sender<()>>,
 }
 
 pub struct SshState(pub Mutex<Option<SshConn>>);
@@ -43,6 +47,13 @@ impl SshState {
     pub fn new() -> Self {
         SshState(Mutex::new(None))
     }
+}
+
+/// 文件变化事件载荷（通过 Tauri 事件总线推送到前端）。
+#[derive(Clone, Serialize)]
+pub struct FileChangedPayload {
+    pub path: String,
+    pub content: String,
 }
 
 // ── 前端可见数据类型 ──────────────────────────────────────────────────────
@@ -62,6 +73,11 @@ pub struct FileEntry {
 fn drive_to_sftp(drive: &str) -> String {
     let d = drive.trim().trim_end_matches([':', '\\', '/']);
     format!("/{}/", d)
+}
+
+/// SFTP 路径（/C:/Users/file.txt）→ Windows 路径（C:\\Users\\file.txt）
+fn sftp_to_windows(sftp_path: &str) -> String {
+    sftp_path.trim_start_matches('/').replace('/', "\\")
 }
 
 /// 拼接 SFTP 路径（保证单斜杠分隔）。
@@ -135,7 +151,7 @@ pub async fn ssh_connect(
     }
 
     let mut guard = state.0.lock().await;
-    *guard = Some(SshConn { handle });
+    *guard = Some(SshConn { handle: Arc::new(handle), watchers: HashMap::new() });
     Ok(())
 }
 
@@ -144,6 +160,8 @@ pub async fn ssh_connect(
 pub async fn ssh_disconnect(state: tauri::State<'_, SshState>) -> Result<(), String> {
     let mut guard = state.0.lock().await;
     if let Some(conn) = guard.take() {
+        // 取消全部文件监视任务（drop sender 即发出取消信号）
+        drop(conn.watchers);
         let _ = conn
             .handle
             .disconnect(russh::Disconnect::ByApplication, "", "en-US")
@@ -261,6 +279,121 @@ pub async fn ssh_write_file(
         .await
         .map_err(|e| e.to_string())?;
 
+    Ok(())
+}
+
+// ── 实时文件监视 ──────────────────────────────────────────────────────────
+
+/// 将 SFTP 路径转为 PowerShell 字符串中安全的 Windows 路径（转义单引号）。
+fn ps_safe_path(sftp_path: &str) -> String {
+    sftp_to_windows(sftp_path).replace('\'', "''")
+}
+
+/// 后台任务：在远端执行 FileSystemWatcher，文件变化时读取内容并通过
+/// Tauri 事件总线推送给前端。
+async fn watch_file_task(
+    handle: Arc<Handle<SshHandler>>,
+    path: String,
+    app_handle: tauri::AppHandle,
+    mut cancel_rx: tokio::sync::oneshot::Receiver<()>,
+) {
+    let win_path = ps_safe_path(&path);
+
+    // PowerShell 脚本：利用 FileSystemWatcher.WaitForChanged 等待变化，
+    // 每 3 秒超时循环一次，以便 cancel 信号能及时响应。
+    let ps = format!(
+        "$p='{win_path}'; \
+         $d=[IO.Path]::GetDirectoryName($p); \
+         $f=[IO.Path]::GetFileName($p); \
+         $w=New-Object IO.FileSystemWatcher $d,$f; \
+         $w.NotifyFilter='LastWrite'; \
+         $w.EnableRaisingEvents=$true; \
+         while($true){{ \
+           $r=$w.WaitForChanged('Changed',3000); \
+           if(!$r.TimedOut){{Write-Host 'CHANGED'}} \
+         }}"
+    );
+    let cmd = format!("powershell -NonInteractive -Command \"{}\"", ps);
+
+    let mut channel = match handle.channel_open_session().await {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    if channel.exec(true, cmd).await.is_err() {
+        return;
+    }
+
+    loop {
+        tokio::select! {
+            // 收到取消信号 → 关闭 SSH 通道（远端进程随之退出）
+            _ = &mut cancel_rx => {
+                let _ = channel.close().await;
+                break;
+            }
+            // 读取远端输出
+            msg = channel.wait() => {
+                match msg {
+                    Some(ChannelMsg::Data { data }) => {
+                        if String::from_utf8_lossy(&data).contains("CHANGED") {
+                            // 读取最新文件内容并推送事件
+                            if let Ok(sftp) = open_sftp(&*handle).await {
+                                if let Ok(mut file) = sftp.open(&path).await {
+                                    let mut buf = Vec::new();
+                                    if file.read_to_end(&mut buf).await.is_ok() {
+                                        let _ = app_handle.emit_all(
+                                            "file-changed",
+                                            FileChangedPayload {
+                                                path: path.clone(),
+                                                content: String::from_utf8_lossy(&buf).into_owned(),
+                                            },
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    None | Some(ChannelMsg::Eof) => break,
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
+/// 开始监视指定文件的变化（基于 Windows FileSystemWatcher，事件驱动推送）。
+#[tauri::command]
+pub async fn ssh_watch_file(
+    app_handle: tauri::AppHandle,
+    state: tauri::State<'_, SshState>,
+    path: String,
+) -> Result<(), String> {
+    let mut guard = state.0.lock().await;
+    let conn = guard.as_mut().ok_or("未连接")?;
+
+    // 停止已存在的同路径监视任务（drop sender → cancel_rx 完成）
+    conn.watchers.remove(&path);
+
+    let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel::<()>();
+    let handle = conn.handle.clone();
+    let path_clone = path.clone();
+
+    tokio::spawn(async move {
+        watch_file_task(handle, path_clone, app_handle, cancel_rx).await;
+    });
+
+    conn.watchers.insert(path, cancel_tx);
+    Ok(())
+}
+
+/// 停止指定文件的监视任务。
+#[tauri::command]
+pub async fn ssh_unwatch_file(
+    state: tauri::State<'_, SshState>,
+    path: String,
+) -> Result<(), String> {
+    let mut guard = state.0.lock().await;
+    let conn = guard.as_mut().ok_or("未连接")?;
+    conn.watchers.remove(&path);
     Ok(())
 }
 
