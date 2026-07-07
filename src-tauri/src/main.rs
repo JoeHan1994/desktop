@@ -6,7 +6,8 @@ mod db;
 mod embed;
 mod store;
 
-use commands::{pipeline, settings, vector_db};
+use commands::{pipeline, settings, vector_db, remote};
+use remote::SshState;
 use db::DbState;
 use store::AppState;
 use tauri::Manager;
@@ -48,6 +49,7 @@ fn main() {
             std::fs::create_dir_all(&data_dir)?;
             let db = DbState::open(&data_dir.join("app.db"))?;
             app.manage(db);
+            app.manage(SshState::new());
 
             Ok(())
         })
@@ -61,6 +63,12 @@ fn main() {
             settings::delete_provider,
             settings::get_setting,
             settings::set_setting,
+            remote::ssh_connect,
+            remote::ssh_disconnect,
+            remote::ssh_get_disks,
+            remote::ssh_list_dir,
+            remote::ssh_read_file,
+            remote::ssh_write_file,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

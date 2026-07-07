@@ -56,23 +56,17 @@ function GlassSelect({ value, options, onChange }: {
   const triggerRef = useRef<HTMLButtonElement>(null);
   const popoverRef = useRef<HTMLDivElement>(null);
   const [pos, setPos] = useState({ top: 0, left: 0 });
+  const closeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     if (!open) return;
-    function handleClick(e: MouseEvent) {
-      const t = e.target as Node;
-      if (!triggerRef.current?.contains(t) && !popoverRef.current?.contains(t)) setOpen(false);
-    }
     function handleScroll() { setOpen(false); }
-    document.addEventListener('mousedown', handleClick);
     window.addEventListener('scroll', handleScroll, true);
-    return () => {
-      document.removeEventListener('mousedown', handleClick);
-      window.removeEventListener('scroll', handleScroll, true);
-    };
+    return () => { window.removeEventListener('scroll', handleScroll, true); };
   }, [open]);
 
-  function handleTrigger() {
+  function openDropdown() {
+    if (closeTimerRef.current) { clearTimeout(closeTimerRef.current); closeTimerRef.current = null; }
     if (!open && triggerRef.current) {
       const r = triggerRef.current.getBoundingClientRect();
       const W = 280, H = 220;
@@ -82,7 +76,11 @@ function GlassSelect({ value, options, onChange }: {
       if (top + H > window.innerHeight) top = r.top - H - 8;
       setPos({ top, left });
     }
-    setOpen((o) => !o);
+    setOpen(true);
+  }
+
+  function scheduleClose() {
+    closeTimerRef.current = setTimeout(() => setOpen(false), 120);
   }
 
   return (
@@ -91,7 +89,8 @@ function GlassSelect({ value, options, onChange }: {
       <button
         ref={triggerRef}
         type="button"
-        onClick={handleTrigger}
+        onMouseEnter={openDropdown}
+        onMouseLeave={scheduleClose}
         className={`flex w-full items-center justify-between rounded-xl border px-3 py-2.5 text-sm transition-colors focus:outline-none ${
           open
             ? 'border-white/20 bg-white/[0.08]'
@@ -120,6 +119,8 @@ function GlassSelect({ value, options, onChange }: {
             transition={{ duration: 0.15, ease: [0.16, 1, 0.3, 1] }}
             style={{ position: 'fixed', top: pos.top, left: pos.left, width: 280, height: 220, zIndex: 9999 }}
             className="flex flex-col overflow-hidden rounded-2xl border border-white/[0.13] bg-[rgb(14_18_28/0.97)] shadow-2xl shadow-black/70 backdrop-blur-2xl"
+            onMouseEnter={() => { if (closeTimerRef.current) { clearTimeout(closeTimerRef.current); closeTimerRef.current = null; } }}
+            onMouseLeave={scheduleClose}
           >
             {/* 顶部高光 */}
             <div className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-white/30 to-transparent" />
@@ -239,28 +240,8 @@ function ProviderModal({
 }) {
   const [form, setForm] = useState<Omit<ModelProvider, 'id'>>(initialData ?? EMPTY_FORM);
   const [showKey, setShowKey] = useState(false);
-  const [ollamaModels, setOllamaModels] = useState<string[]>([]);
-  const [ollamaLoading, setOllamaLoading] = useState(false);
   const meta = PROVIDER_META[form.provider];
   const isEditing = !!initialData;
-
-  useEffect(() => {
-    if (form.provider !== 'ollama') return;
-    setOllamaLoading(true);
-    const base = (form.apiBaseUrl || PROVIDER_META.ollama.defaultUrl).replace(/\/$/, '');
-    fetch(`${base}/api/tags`)
-      .then((r) => r.json())
-      .then((data) => {
-        const names: string[] = (data?.models ?? []).map((m: { name: string }) => m.name);
-        setOllamaModels(names);
-        if (names.length > 0 && !names.includes(form.model)) {
-          setForm((prev) => ({ ...prev, model: names[0] }));
-        }
-      })
-      .catch(() => setOllamaModels([]))
-      .finally(() => setOllamaLoading(false));
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [form.provider, form.apiBaseUrl]);
 
   function set<K extends keyof typeof form>(k: K, v: (typeof form)[K]) {
     setForm((prev) => ({ ...prev, [k]: v }));
@@ -371,36 +352,12 @@ function ProviderModal({
 
             {/* Model */}
             <FormRow label="Model" required>
-              {form.provider === 'ollama' ? (
-                ollamaLoading ? (
-                  <div className={fieldCls + ' flex items-center gap-2 text-white/35'}>
-                    <svg className="h-3.5 w-3.5 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                      <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83" />
-                    </svg>
-                    <span className="text-[12px]">正在获取模型列表…</span>
-                  </div>
-                ) : ollamaModels.length > 0 ? (
-                  <GlassSelect
-                    value={form.model}
-                    options={ollamaModels}
-                    onChange={(v) => set('model', v)}
-                  />
-                ) : (
-                  <input
-                    className={fieldCls}
-                    placeholder="无法连接 Ollama，请手动输入模型名"
-                    value={form.model}
-                    onChange={(e) => set('model', e.target.value)}
-                  />
-                )
-              ) : (
-                <input
-                  className={fieldCls}
-                  placeholder={meta.modelPlaceholder}
-                  value={form.model}
-                  onChange={(e) => set('model', e.target.value)}
-                />
-              )}
+              <input
+                className={fieldCls}
+                placeholder={form.provider === 'ollama' ? '输入模型名，如 qwen2.5:3b' : meta.modelPlaceholder}
+                value={form.model}
+                onChange={(e) => set('model', e.target.value)}
+              />
             </FormRow>
 
             {/* API Key */}
@@ -474,7 +431,7 @@ function ProviderRow({
   onDelete: () => void;
 }) {
   const ref = useRef<HTMLDivElement>(null);
-  const inView = useInView(ref, { amount: 0.5, triggerOnce: false });
+  const inView = useInView(ref, { amount: 0.5 });
   const meta = PROVIDER_META[provider.provider];
   return (
     <motion.div
@@ -1265,7 +1222,7 @@ function RagScoreBar({ value, color }: { value: number; color: string }) {
 
 function RagSourceCard({ source, active, onSelect }: { source: RagSource; active: boolean; onSelect: () => void }) {
   const ref = useRef<HTMLButtonElement>(null);
-  const inView = useInView(ref, { amount: 0.5, triggerOnce: false });
+  const inView = useInView(ref, { amount: 0.5 });
   const color = source.score > 0.9 ? '#34d399' : source.score > 0.84 ? '#60a5fa' : '#fbbf24';
 
   return (
@@ -1459,7 +1416,7 @@ function KbVectorHeatmap() {
 
 function KbChunkCard({ chunk, active, onSelect }: { chunk: KbChunk; active: boolean; onSelect: () => void }) {
   const ref = useRef<HTMLButtonElement>(null);
-  const inView = useInView(ref, { amount: 0.5, triggerOnce: false });
+  const inView = useInView(ref, { amount: 0.5 });
   const tokenPct = (chunk.tokens / KB_TOKEN_LIMIT) * 100;
   return (
     <motion.button
@@ -1498,7 +1455,7 @@ function KbChunkCard({ chunk, active, onSelect }: { chunk: KbChunk; active: bool
 
 function KbFileCard({ file, active, onSelect }: { file: KbFileRecord; active: boolean; onSelect: () => void }) {
   const ref = useRef<HTMLButtonElement>(null);
-  const inView = useInView(ref, { amount: 0.5, triggerOnce: false });
+  const inView = useInView(ref, { amount: 0.5 });
   const completed = file.status === 'completed';
   const totalTokens = file.chunks.reduce((sum, chunk) => sum + chunk.tokens, 0);
   const progress = completed ? 100 : 46;

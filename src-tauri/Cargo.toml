@@ -14,6 +14,10 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tokio = { version = "1", features = ["full"] }
 rusqlite = { version = "0.31", features = ["bundled"] }
+russh         = "0.44"
+russh-keys    = "0.44"
+russh-sftp    = "2.0"
+async-trait   = "0.1"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.48", features = ["Win32_Graphics_Dwm", "Win32_Foundation"] }

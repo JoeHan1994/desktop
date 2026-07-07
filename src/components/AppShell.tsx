@@ -6,12 +6,14 @@ import { Sidebar } from '@/components/Sidebar';
 import { ThemeConfigurator } from '@/features/theme/ThemeConfigurator';
 import type { ViewId } from '@/features/nav/navConfig';
 import { AssistantView, KnowledgeBaseManagerView, RagView, SettingsView } from '@/components/views/Views';
+import { RemoteMachineView } from '@/features/remote/RemoteMachineView';
 
 const VIEWS: Record<ViewId, () => JSX.Element> = {
   assistant: AssistantView,
   rag:       RagView,
   knowledge: KnowledgeBaseManagerView,
   settings:  SettingsView,
+  remote:    RemoteMachineView,
 };
 
 type TauriAppWindow = typeof import('@tauri-apps/api/window').appWindow;

@@ -3,3 +3,4 @@
 pub mod pipeline;
 pub mod settings;
 pub mod vector_db;
+pub mod remote;

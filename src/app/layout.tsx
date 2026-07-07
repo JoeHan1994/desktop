@@ -4,6 +4,7 @@ import { HyperspeedBackground } from '@/components/HyperspeedBackground';
 import { ThemeProvider } from '@/features/theme/ThemeContext';
 import { ModelProvidersProvider } from '@/features/models/ModelProvidersContext';
 import { ErrorBoundary } from '@/components/ErrorBoundary';
+import { SplashScreen } from '@/components/SplashScreen';
 
 export const metadata: Metadata = {
   title: 'Vector Vision',
@@ -26,6 +27,8 @@ export default function RootLayout({
         <ThemeProvider>
           <ModelProvidersProvider>
           <div className="relative flex h-screen min-h-0 flex-col bg-[#04060c]">
+            {/* 启动动画遮罩 */}
+            <SplashScreen />
             {/* 全局 Hyperspeed 光速隧道背景 */}
             <HyperspeedBackground />
             <main className="relative z-10 flex-1 min-h-0 h-full overflow-hidden">
