@@ -18,6 +18,7 @@ use tauri::State;
 
 use crate::embed;
 use crate::store::{AppState, AppStateInner, PipelineStats, VectorEntry, VectorPoint};
+use crate::text_file::decode_utf8_text_file;
 
 // ── Tauri Commands ────────────────────────────────────────────────────────
 
@@ -106,7 +107,10 @@ fn run_pipeline(
         if !file_types.contains(&ext) {
             file_types.push(ext);
         }
-        match std::fs::read_to_string(path) {
+        match std::fs::read(path)
+            .map_err(|e| e.to_string())
+            .and_then(|bytes| decode_utf8_text_file(path, bytes))
+        {
             Ok(content) => {
                 total_bytes +=
                     path.metadata().map(|m| m.len()).unwrap_or(content.len() as u64);
@@ -311,7 +315,7 @@ fn epoch_date_str() -> String {
 }
 
 fn is_leap(y: u32) -> bool {
-    (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
+    (y.is_multiple_of(4) && !y.is_multiple_of(100)) || y.is_multiple_of(400)
 }
 
 /// 去除 HTML 标签、控制字符，并合并连续空白。

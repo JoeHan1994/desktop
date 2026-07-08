@@ -118,7 +118,7 @@ function GlassSelect({ value, options, onChange }: {
             exit={{ opacity: 0, scale: 0.96, y: -6 }}
             transition={{ duration: 0.15, ease: [0.16, 1, 0.3, 1] }}
             style={{ position: 'fixed', top: pos.top, left: pos.left, width: 280, height: 220, zIndex: 9999 }}
-            className="flex flex-col overflow-hidden rounded-2xl border border-white/[0.13] bg-[rgb(14_18_28/0.97)] shadow-2xl shadow-black/70 backdrop-blur-2xl"
+            className="dark-popover flex flex-col overflow-hidden rounded-2xl border border-white/[0.13] bg-[rgb(14_18_28/0.97)] shadow-2xl shadow-black/70 backdrop-blur-2xl"
             onMouseEnter={() => { if (closeTimerRef.current) { clearTimeout(closeTimerRef.current); closeTimerRef.current = null; } }}
             onMouseLeave={scheduleClose}
           >
@@ -279,7 +279,7 @@ function ProviderModal({
         className="pointer-events-none fixed inset-0 z-50 flex items-center justify-center"
       >
         <div
-          className="glass pointer-events-auto w-[min(90vw,460px)] overflow-hidden rounded-2xl shadow-2xl shadow-black/60"
+          className="glass dark-popover pointer-events-auto w-[min(90vw,460px)] overflow-hidden rounded-2xl shadow-2xl shadow-black/60"
           onClick={(e) => e.stopPropagation()}
         >
           {/* 顶部高光 */}

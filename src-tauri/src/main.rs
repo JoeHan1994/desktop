@@ -5,6 +5,7 @@ mod commands;
 mod db;
 mod embed;
 mod store;
+mod text_file;
 
 use commands::{pipeline, settings, vector_db, remote};
 use remote::SshState;
@@ -66,6 +67,8 @@ fn main() {
             remote::ssh_connect,
             remote::ssh_disconnect,
             remote::ssh_get_disks,
+            remote::ssh_list_hyperv_vms,
+            remote::ssh_set_hyperv_vm_state,
             remote::ssh_list_dir,
             remote::ssh_read_file,
             remote::ssh_write_file,

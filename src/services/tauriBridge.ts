@@ -12,80 +12,145 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 
 /** 向量点位（与 Rust `store::VectorPoint` 约定一致）。 */
 export interface VectorPoint {
-  id: string;
-  position: [number, number, number];
-  score?: number;
+	id: string;
+	position: [number, number, number];
+	score?: number;
 }
 
 /** 向量检索请求参数（query 为自然语言文本，Rust 侧负责嵌入）。 */
 export interface SearchParams {
-  /** 自然语言查询文本 */
-  query: string;
-  topK: number;
+	/** 自然语言查询文本 */
+	query: string;
+	topK: number;
 }
 
 /** 单条检索结果（含原文与相似度得分）。 */
 export interface SearchResult {
-  id: string;
-  text: string;
-  source: string;
-  score: number;
-  position: [number, number, number];
+	id: string;
+	text: string;
+	source: string;
+	score: number;
+	position: [number, number, number];
 }
 
 /** 流水线启动请求。 */
 export interface IngestRequest {
-  paths: string[];
+	paths: string[];
 }
 
 /** 与 Rust `store::PipelineStats` 字段一一对应的前端类型。 */
 export interface PipelineStats {
-  active_stage: number;
-  // 1.1
-  file_count: number;
-  file_size_bytes: number;
-  file_types: string[];
-  // 1.2
-  chars_before_clean: number;
-  chars_after_clean: number;
-  clean_progress: number;
-  // 1.3
-  chunk_count: number;
-  overlap_pct: number;
-  // 2.1
-  model_name: string;
-  model_dim: number;
-  vram_used_gb: number;
-  vram_total_gb: number;
-  // 2.2
-  tokens_per_sec: number;
-  sample_vector: string;
-  // 2.3
-  last_payload_json: string;
-  // 3.1
-  db_engine: string;
-  db_ping_ms: number;
-  distance_metric: string;
-  // 3.2
-  write_qps: number;
-  write_concurrency: number;
-  // 3.3
-  hnsw_progress: number;
-  hnsw_nodes: number;
-  // 4.1
-  last_query_embed_ms: number;
-  // 4.2
-  last_search_ms: number;
-  last_scores: number[];
-  // 4.3
-  recall_merge_rate: number;
-  scores_before_rerank: number[];
-  scores_after_rerank: number[];
-  // 5.1
-  reduce_iters: number;
-  reduce_last_coord: [number, number, number];
-  // 5.2
-  particle_count: number;
+	active_stage: number;
+	// 1.1
+	file_count: number;
+	file_size_bytes: number;
+	file_types: string[];
+	// 1.2
+	chars_before_clean: number;
+	chars_after_clean: number;
+	clean_progress: number;
+	// 1.3
+	chunk_count: number;
+	overlap_pct: number;
+	// 2.1
+	model_name: string;
+	model_dim: number;
+	vram_used_gb: number;
+	vram_total_gb: number;
+	// 2.2
+	tokens_per_sec: number;
+	sample_vector: string;
+	// 2.3
+	last_payload_json: string;
+	// 3.1
+	db_engine: string;
+	db_ping_ms: number;
+	distance_metric: string;
+	// 3.2
+	write_qps: number;
+	write_concurrency: number;
+	// 3.3
+	hnsw_progress: number;
+	hnsw_nodes: number;
+	// 4.1
+	last_query_embed_ms: number;
+	// 4.2
+	last_search_ms: number;
+	last_scores: number[];
+	// 4.3
+	recall_merge_rate: number;
+	scores_before_rerank: number[];
+	scores_after_rerank: number[];
+	// 5.1
+	reduce_iters: number;
+	reduce_last_coord: [number, number, number];
+	// 5.2
+	particle_count: number;
+}
+
+/** 远程机器连接配置（保存在本地 app_settings）。 */
+export interface RemoteMachineProfile {
+	id: string;
+	label: string;
+	host: string;
+	port: string;
+	username: string;
+	password: string;
+	lastConnectedAt: string;
+}
+
+/** 远程文件/目录条目（与 Rust `FileEntry` 结构一致）。 */
+export interface RemoteFileEntry {
+	name: string;
+	path: string;
+	is_dir: boolean;
+	size: number | null;
+}
+
+export interface RemoteFileChangedPayload {
+	connectionId: string;
+	path: string;
+	kind?: 'snapshot' | 'append';
+	content: string;
+}
+
+export type RemoteConnectionKind = 'host' | 'vm';
+
+export interface RemoteConnection {
+	id: string;
+	label: string;
+	host: string;
+	port: number;
+	username: string;
+	kind: RemoteConnectionKind;
+	parentConnectionId: string | null;
+	parentProfileId: string | null;
+	vmId: string | null;
+}
+
+export interface HyperVVirtualMachine {
+	id: string;
+	name: string;
+	state: string;
+	status: string;
+	generation: number | null;
+	uptime: string;
+	memoryAssigned: number | null;
+	cpuUsage: number | null;
+	path: string;
+	ipAddresses: string[];
+}
+
+export interface SshConnectParams {
+	host: string;
+	port?: number;
+	username: string;
+	password: string;
+	label?: string;
+	kind?: RemoteConnectionKind;
+	parentConnectionId?: string;
+	parentProfileId?: string;
+	vmId?: string;
 }
 
 // ── Tauri Commands ────────────────────────────────────────────────────────
@@ -95,7 +160,7 @@ export interface PipelineStats {
  * Rust 端将 query 文本嵌入后执行 cosine Top-K 搜索。
  */
 export async function searchVectors(params: SearchParams): Promise<SearchResult[]> {
-  return invoke<SearchResult[]>('search_vectors', { params });
+	return invoke<SearchResult[]>('search_vectors', { params });
 }
 
 /**
@@ -103,21 +168,94 @@ export async function searchVectors(params: SearchParams): Promise<SearchResult[
  * @param paths 文件系统绝对路径列表
  */
 export async function startPipeline(paths: string[]): Promise<void> {
-  return invoke('start_pipeline', { request: { paths } });
+	return invoke('start_pipeline', { request: { paths } });
 }
 
 /**
  * 查询当前流水线统计快照（适合挂载时一次性拉取）。
  */
 export async function getPipelineStats(): Promise<PipelineStats> {
-  return invoke<PipelineStats>('get_pipeline_stats');
+	return invoke<PipelineStats>('get_pipeline_stats');
 }
 
 /**
  * 获取所有向量的 3D 点位（适合页面挂载时拉取已有数据）。
  */
 export async function getVectorPoints(): Promise<VectorPoint[]> {
-  return invoke<VectorPoint[]>('get_vector_points');
+	return invoke<VectorPoint[]>('get_vector_points');
+}
+
+// ── Remote Machine SSH ───────────────────────────────────────────────────
+
+/** 建立 SSH 连接并完成认证。 */
+export async function sshConnect(params: SshConnectParams): Promise<RemoteConnection> {
+	return invoke<RemoteConnection>('ssh_connect', {
+		request: {
+			host: params.host,
+			port: params.port,
+			username: params.username,
+			password: params.password,
+			label: params.label,
+			kind: params.kind,
+			parentConnectionId: params.parentConnectionId,
+			parentProfileId: params.parentProfileId,
+			vmId: params.vmId,
+		},
+	});
+}
+
+/** 断开指定 SSH 连接。 */
+export async function sshDisconnect(connectionId: string): Promise<void> {
+	return invoke('ssh_disconnect', { connectionId });
+}
+
+/** 获取远程 Windows 机器磁盘根目录。 */
+export async function sshGetDisks(connectionId: string): Promise<string[]> {
+	return invoke<string[]>('ssh_get_disks', { connectionId });
+}
+
+/** 获取远程 Hyper-V VM 列表。 */
+export async function sshListHyperVVMs(connectionId: string): Promise<HyperVVirtualMachine[]> {
+	return invoke<HyperVVirtualMachine[]>('ssh_list_hyperv_vms', { connectionId });
+}
+
+/** 启动或停止远程 Hyper-V VM。 */
+export async function sshSetHyperVVMState(connectionId: string, vmId: string, action: 'start' | 'stop'): Promise<void> {
+	return invoke('ssh_set_hyperv_vm_state', { connectionId, vmId, action });
+}
+
+/** 列出远程目录内容。 */
+export async function sshListDir(connectionId: string, path: string): Promise<RemoteFileEntry[]> {
+	return invoke<RemoteFileEntry[]>('ssh_list_dir', { connectionId, path });
+}
+
+/** 读取远程文本文件内容。 */
+export async function sshReadFile(connectionId: string, path: string): Promise<string> {
+	return invoke<string>('ssh_read_file', { connectionId, path });
+}
+
+/** 覆盖写入远程文本文件内容。 */
+export async function sshWriteFile(connectionId: string, path: string, content: string): Promise<void> {
+	return invoke('ssh_write_file', { connectionId, path, content });
+}
+
+/** 开始监视远程文件。 */
+export async function sshWatchFile(connectionId: string, path: string): Promise<void> {
+	return invoke('ssh_watch_file', { connectionId, path });
+}
+
+/** 停止监视远程文件。 */
+export async function sshUnwatchFile(connectionId: string, path: string): Promise<void> {
+	return invoke('ssh_unwatch_file', { connectionId, path });
+}
+
+/** 订阅远程文件变更事件。 */
+export async function subscribeRemoteFileChanged(
+	onData: (payload: RemoteFileChangedPayload) => void,
+): Promise<UnlistenFn> {
+	return listen<RemoteFileChangedPayload>('file-changed', (event) => {
+		onData(event.payload);
+	});
 }
 
 // ── Tauri Events ──────────────────────────────────────────────────────────
@@ -126,12 +264,10 @@ export async function getVectorPoints(): Promise<VectorPoint[]> {
  * 订阅流水线实时统计推送（`pipeline-stats` 事件）。
  * 返回取消订阅函数，请在组件卸载时调用。
  */
-export async function subscribePipelineStats(
-  onData: (stats: PipelineStats) => void,
-): Promise<UnlistenFn> {
-  return listen<PipelineStats>('pipeline-stats', (event) => {
-    onData(event.payload);
-  });
+export async function subscribePipelineStats(onData: (stats: PipelineStats) => void): Promise<UnlistenFn> {
+	return listen<PipelineStats>('pipeline-stats', (event) => {
+		onData(event.payload);
+	});
 }
 
 /**
@@ -139,24 +275,20 @@ export async function subscribePipelineStats(
  * 流水线完成后后端推送一次全量点位。
  * 返回取消订阅函数，请在组件卸载时调用。
  */
-export async function subscribeVectorStream(
-  onData: (points: VectorPoint[]) => void,
-): Promise<UnlistenFn> {
-  return listen<VectorPoint[]>('vector-stream', (event) => {
-    onData(event.payload);
-  });
+export async function subscribeVectorStream(onData: (points: VectorPoint[]) => void): Promise<UnlistenFn> {
+	return listen<VectorPoint[]>('vector-stream', (event) => {
+		onData(event.payload);
+	});
 }
 
 /**
  * 订阅检索高亮点位推送（`search-results` 事件）。
  * 每次 search_vectors 命令执行后后端推送命中点位。
  */
-export async function subscribeSearchResults(
-  onData: (points: VectorPoint[]) => void,
-): Promise<UnlistenFn> {
-  return listen<VectorPoint[]>('search-results', (event) => {
-    onData(event.payload);
-  });
+export async function subscribeSearchResults(onData: (points: VectorPoint[]) => void): Promise<UnlistenFn> {
+	return listen<VectorPoint[]>('search-results', (event) => {
+		onData(event.payload);
+	});
 }
 
 // ── Settings: Model Providers ─────────────────────────────────────────────
@@ -166,17 +298,17 @@ export async function subscribeSearchResults(
  * 独立定义在此处以避免与 UI 层产生循环依赖。
  */
 export interface ModelProviderPayload {
-  id: string;
-  name: string;
-  provider: string;     // 'ollama' | 'openai'
-  apiBaseUrl: string;
-  model: string;
-  apiKey: string;
+	id: string;
+	name: string;
+	provider: string; // 'ollama' | 'openai'
+	apiBaseUrl: string;
+	model: string;
+	apiKey: string;
 }
 
 /** 从磁盘加载所有已保存的 Model Provider。 */
 export async function getProviders(): Promise<ModelProviderPayload[]> {
-  return invoke<ModelProviderPayload[]>('get_providers');
+	return invoke<ModelProviderPayload[]>('get_providers');
 }
 
 /**
@@ -184,23 +316,22 @@ export async function getProviders(): Promise<ModelProviderPayload[]> {
  * id 已存在则覆盖，否则追加。
  */
 export async function upsertProvider(provider: ModelProviderPayload): Promise<void> {
-  return invoke('upsert_provider', { provider });
+	return invoke('upsert_provider', { provider });
 }
 
 /** 按 id 删除一个 Model Provider。 */
 export async function deleteProvider(id: string): Promise<void> {
-  return invoke('delete_provider', { id });
+	return invoke('delete_provider', { id });
 }
 
 // ── 通用键值设置 ──────────────────────────────────────────────────────────
 
 /** 读取一个持久化设置项（不存在时返回 null）。 */
 export async function getSetting(key: string): Promise<string | null> {
-  return invoke<string | null>('get_setting', { key });
+	return invoke<string | null>('get_setting', { key });
 }
 
 /** 写入（或覆盖）一个持久化设置项。 */
 export async function setSetting(key: string, value: string): Promise<void> {
-  return invoke('set_setting', { key, value });
+	return invoke('set_setting', { key, value });
 }
-
