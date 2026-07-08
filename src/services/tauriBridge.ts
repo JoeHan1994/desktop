@@ -94,6 +94,7 @@ export interface RemoteMachineProfile {
 	label: string;
 	host: string;
 	port: string;
+	rdpPort?: string;
 	username: string;
 	password: string;
 	lastConnectedAt: string;
@@ -153,6 +154,34 @@ export interface SshConnectParams {
 	vmId?: string;
 }
 
+export interface RdpOpenParams {
+	host: string;
+	port?: number;
+	username?: string;
+	password?: string;
+}
+
+export interface WinRmOpenSshSetupParams {
+	runId: string;
+	host: string;
+	winrmPort?: number;
+	username: string;
+	password: string;
+	sshPort?: number;
+	firewallProfile?: 'Any' | 'Domain' | 'Private' | 'Public';
+	setNetworkPrivate?: boolean;
+	enablePasswordAuthentication?: boolean;
+}
+
+export interface WinRmOpenSshSetupOutputPayload {
+	runId: string;
+	stream: 'stdout' | 'stderr' | 'status' | 'error';
+	line: string;
+	done: boolean;
+	exitCode: number | null;
+	error: string | null;
+}
+
 // ── Tauri Commands ────────────────────────────────────────────────────────
 
 /**
@@ -186,6 +215,35 @@ export async function getVectorPoints(): Promise<VectorPoint[]> {
 }
 
 // ── Remote Machine SSH ───────────────────────────────────────────────────
+
+/** 打开本机 Windows Remote Desktop 客户端。 */
+export async function rdpOpen(params: RdpOpenParams): Promise<void> {
+	return invoke('rdp_open', {
+		request: {
+			host: params.host,
+			port: params.port,
+			username: params.username,
+			password: params.password,
+		},
+	});
+}
+
+/** 通过本机 WinRM/PowerShell 在目标 Windows 机器上执行 OpenSSH 初始化脚本。 */
+export async function winRmRunOpenSshSetup(params: WinRmOpenSshSetupParams): Promise<void> {
+	return invoke('winrm_run_open_ssh_setup', {
+		request: {
+			runId: params.runId,
+			host: params.host,
+			winrmPort: params.winrmPort,
+			username: params.username,
+			password: params.password,
+			sshPort: params.sshPort,
+			firewallProfile: params.firewallProfile,
+			setNetworkPrivate: params.setNetworkPrivate,
+			enablePasswordAuthentication: params.enablePasswordAuthentication,
+		},
+	});
+}
 
 /** 建立 SSH 连接并完成认证。 */
 export async function sshConnect(params: SshConnectParams): Promise<RemoteConnection> {
@@ -254,6 +312,15 @@ export async function subscribeRemoteFileChanged(
 	onData: (payload: RemoteFileChangedPayload) => void,
 ): Promise<UnlistenFn> {
 	return listen<RemoteFileChangedPayload>('file-changed', (event) => {
+		onData(event.payload);
+	});
+}
+
+/** 订阅 WinRM 执行 OpenSSH 初始化脚本的终端输出事件。 */
+export async function subscribeWinRmOpenSshSetupOutput(
+	onData: (payload: WinRmOpenSshSetupOutputPayload) => void,
+): Promise<UnlistenFn> {
+	return listen<WinRmOpenSshSetupOutputPayload>('winrm-open-ssh-setup-output', (event) => {
 		onData(event.payload);
 	});
 }

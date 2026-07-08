@@ -64,6 +64,8 @@ fn main() {
             settings::delete_provider,
             settings::get_setting,
             settings::set_setting,
+            remote::winrm_run_open_ssh_setup,
+            remote::rdp_open,
             remote::ssh_connect,
             remote::ssh_disconnect,
             remote::ssh_get_disks,

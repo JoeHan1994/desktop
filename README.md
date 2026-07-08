@@ -10,6 +10,7 @@
 - **3D 液态玻璃 UI**：基于 WebGL / Three.js 的实时折射、动态流体、毛玻璃模糊三位一体视觉系统
 - **本地 AI 对话**：接入 Ollama / OpenAI 兼容 API，流式逐字输出，Token 用量实时可视化
 - **RAG 工作台**：Hybrid / Vector / Keyword 三种检索模式，上下文召回与引用校验可视化
+- **Windows 远程引导**：远程机器视图可打开 RDP，并下载 OpenSSH 配置脚本，便于先进入目标 Windows 启用 SSH
 - **知识库管理**：拖拽上传 PDF / Word / Excel，Chunk 实时审核，向量化进度追踪
 - **私有化部署**：数据完全本地，SQLite 持久化，零网络依赖
 - **自定义外观**：液态玻璃主题参数（颜色、透明度、模糊、圆角）实时可调
@@ -19,16 +20,16 @@
 
 ## 技术栈
 
-| 层级 | 技术 |
-|------|------|
-| 桌面运行时 | [Tauri 1.x](https://tauri.app) |
-| 前端框架 | [Next.js 14](https://nextjs.org) (静态导出 SSG) |
-| 3D 渲染 | [Three.js](https://threejs.org) + [React Three Fiber](https://docs.pmnd.rs/react-three-fiber) + [@react-three/drei](https://github.com/pmndrs/drei) |
-| 动画 | [Framer Motion](https://www.framer.com/motion/) |
-| 样式 | [Tailwind CSS 3](https://tailwindcss.com) |
-| 后端逻辑 | Rust (Tauri commands) |
-| 本地数据库 | SQLite via `rusqlite` (bundled) |
-| Markdown 渲染 | `react-markdown` + `remark-gfm` |
+| 层级          | 技术                                                                                                                                                |
+| ------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 桌面运行时    | [Tauri 1.x](https://tauri.app)                                                                                                                      |
+| 前端框架      | [Next.js 14](https://nextjs.org) (静态导出 SSG)                                                                                                     |
+| 3D 渲染       | [Three.js](https://threejs.org) + [React Three Fiber](https://docs.pmnd.rs/react-three-fiber) + [@react-three/drei](https://github.com/pmndrs/drei) |
+| 动画          | [Framer Motion](https://www.framer.com/motion/)                                                                                                     |
+| 样式          | [Tailwind CSS 3](https://tailwindcss.com)                                                                                                           |
+| 后端逻辑      | Rust (Tauri commands)                                                                                                                               |
+| 本地数据库    | SQLite via `rusqlite` (bundled)                                                                                                                     |
+| Markdown 渲染 | `react-markdown` + `remark-gfm`                                                                                                                     |
 
 ---
 
@@ -75,11 +76,11 @@
 
 ### 前置依赖
 
-| 工具 | 版本要求 |
-|------|---------|
-| Node.js | ≥ 18 |
-| Rust & Cargo | stable（通过 [rustup](https://rustup.rs) 安装）|
-| Tauri CLI | 通过 `npm run tauri` 封装，无需全局安装 |
+| 工具                | 版本要求                                                                                                 |
+| ------------------- | -------------------------------------------------------------------------------------------------------- |
+| Node.js             | ≥ 18                                                                                                     |
+| Rust & Cargo        | stable（通过 [rustup](https://rustup.rs) 安装）                                                          |
+| Tauri CLI           | 通过 `npm run tauri` 封装，无需全局安装                                                                  |
 | WebView2（Windows） | Windows 11 内置，Windows 10 需[手动安装](https://developer.microsoft.com/en-us/microsoft-edge/webview2/) |
 
 ### 安装依赖
@@ -115,12 +116,26 @@ npm run dev
 
 ## 视图说明
 
-| 视图 | 路由标识 | 功能 |
-|------|---------|------|
-| AI 对话 | `assistant` | 与本地/云端 LLM 流式对话，Token 用量实时统计 |
-| RAG 检索 | `rag` | 检索增强生成工作台，支持 Hybrid / Vector / Keyword 三模式 |
-| Knowledge Base | `knowledge` | 文件上传、解析状态、Chunk 审核、元数据绑定 |
-| 设置 | `settings` | Model Provider 管理（Ollama / OpenAI 兼容接口） |
+| 视图           | 路由标识    | 功能                                                                          |
+| -------------- | ----------- | ----------------------------------------------------------------------------- |
+| AI 对话        | `assistant` | 与本地/云端 LLM 流式对话，Token 用量实时统计                                  |
+| RAG 检索       | `rag`       | 检索增强生成工作台，支持 Hybrid / Vector / Keyword 三模式                     |
+| Knowledge Base | `knowledge` | 文件上传、解析状态、Chunk 审核、元数据绑定                                    |
+| 远程机器       | `remote`    | 通过 RDP 引导启用 OpenSSH，再使用 SSH/SFTP 浏览远程 Windows 文件与 Hyper-V VM |
+| 设置           | `settings`  | Model Provider 管理（Ollama / OpenAI 兼容接口）                               |
+
+---
+
+## Windows 远程连接引导
+
+当目标 Windows 机器还没有启用 OpenSSH 时，可以先在「远程机器」视图创建 profile，点击显示器图标打开 RDP。RDP 会尽量复用 profile 中已保存的账号密码，并通过 Windows Credential Manager 提供给远程桌面客户端。顶部的 Script 按钮会下载 `configure-windows-ssh-server.ps1`，将脚本带到目标机器后，在管理员 PowerShell 中执行：
+
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
+.\configure-windows-ssh-server.ps1 -SetNetworkPrivate -EnablePasswordAuthentication
+```
+
+脚本完成后回到应用点击 SSH 连接，即可继续使用远程文件浏览、日志查看和 Hyper-V VM 操作。RDP 本身需要目标机器已允许远程桌面并且网络可达；该入口不会远程开启 RDP 服务。
 
 ---
 

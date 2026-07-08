@@ -8,6 +8,7 @@ import { useModelProviders, type ModelProvider } from '@/features/models/ModelPr
 import { streamChat, type LLMMessage, type TokenStats } from '@/services/llmClient';
 import {
 	getSetting,
+	rdpOpen,
 	setSetting,
 	sshConnect,
 	sshDisconnect,
@@ -20,10 +21,13 @@ import {
 	sshWatchFile,
 	sshWriteFile,
 	subscribeRemoteFileChanged,
+	subscribeWinRmOpenSshSetupOutput,
+	winRmRunOpenSshSetup,
 	type HyperVVirtualMachine,
 	type RemoteConnection,
 	type RemoteFileEntry,
 	type RemoteMachineProfile,
+	type WinRmOpenSshSetupOutputPayload,
 } from '@/services/tauriBridge';
 
 // ── 类型 ───────────────────────────────────────────────────────────────────
@@ -37,6 +41,13 @@ interface TreeNode extends FileEntry {
 }
 
 type ConnStatus = 'idle' | 'connecting' | 'connected' | 'error';
+type WinRmTerminalStatus = 'idle' | 'running' | 'done' | 'error';
+
+interface WinRmTerminalLine {
+	id: string;
+	stream: WinRmOpenSshSetupOutputPayload['stream'];
+	text: string;
+}
 
 interface HyperVVmCredentialProfile {
 	id: string;
@@ -57,6 +68,22 @@ interface PendingVmConnection {
 	host: string;
 	credentialKey: string;
 }
+
+interface RdpCredential {
+	username?: string;
+	password?: string;
+}
+
+interface WinRmOpenSshSetupTarget {
+	key: string;
+	label: string;
+	host: string;
+	username?: string;
+	password?: string;
+	sshPort?: string;
+}
+
+const EMPTY_TREE_RECORD: Record<string, TreeNode[]> = {};
 
 // ── 工具函数 ───────────────────────────────────────────────────────────────
 
@@ -99,6 +126,13 @@ function updateNode(nodes: TreeNode[], targetPath: string, updater: (n: TreeNode
 	});
 }
 
+function collectTreeFileSizes(nodes: TreeNode[], target: Map<string, number | null>) {
+	for (const node of nodes) {
+		if (!node.is_dir) target.set(node.path, node.size);
+		if (node.children) collectTreeFileSizes(node.children, target);
+	}
+}
+
 // ── 错误 / 警告行分类与高亮显示 ─────────────────────────────────
 
 /** 匹配错误级别的日志行模式（英文 + 中文 + 堆栈跟踪） */
@@ -122,6 +156,14 @@ const MAX_LINES = 8000;
 const PROBLEM_CONTEXT_LINES = 5;
 const LOG_ANALYSIS_CONTEXT_BLOCKS = 5;
 const LOG_ANALYSIS_NO_ERROR_BLOCK_LIMIT = 40;
+const MAX_ANALYSIS_REMOTE_FILE_BYTES = 12 * 1024 * 1024;
+const MAX_ANALYSIS_CONTENT_CHARS = 180_000;
+const ANALYSIS_READ_TIMEOUT_MS = 45_000;
+const ANALYSIS_STREAM_IDLE_TIMEOUT_MS = 120_000;
+
+class AnalysisAbortError extends Error {}
+
+class AnalysisTimeoutError extends Error {}
 
 interface ContentDisplayLine {
 	text: string;
@@ -327,6 +369,7 @@ interface AnalysisFileResult {
 	path: string;
 	displayPath: string;
 	status: AnalysisFileStatus;
+	statusDetail: string;
 	language: AnalysisLanguage;
 	output: string;
 	error: string;
@@ -491,6 +534,76 @@ async function readRemoteFileWithRetry(connectionId: string, path: string): Prom
 		await delay(250);
 		return sshReadFile(connectionId, path);
 	}
+}
+
+function analysisErrorMessage(err: unknown): string {
+	return err instanceof Error ? err.message : String(err);
+}
+
+function withAnalysisTimeout<T>(
+	promise: Promise<T>,
+	timeoutMs: number,
+	timeoutMessage: string,
+	signal?: AbortSignal,
+): Promise<T> {
+	if (signal?.aborted) return Promise.reject(new AnalysisAbortError('分析已停止。'));
+
+	return new Promise<T>((resolve, reject) => {
+		let settled = false;
+		let timeoutId: ReturnType<typeof setTimeout>;
+		const onAbort = () => finish(() => reject(new AnalysisAbortError('分析已停止。')));
+		const cleanup = () => {
+			clearTimeout(timeoutId);
+			signal?.removeEventListener('abort', onAbort);
+		};
+		const finish = (complete: () => void) => {
+			if (settled) return;
+			settled = true;
+			cleanup();
+			complete();
+		};
+
+		timeoutId = setTimeout(() => finish(() => reject(new AnalysisTimeoutError(timeoutMessage))), timeoutMs);
+		signal?.addEventListener('abort', onAbort, { once: true });
+		promise.then(
+			(value) => finish(() => resolve(value)),
+			(err: unknown) => finish(() => reject(err)),
+		);
+	});
+}
+
+async function* withAnalysisStreamIdleTimeout<T>(
+	stream: AsyncIterable<T>,
+	timeoutMs: number,
+	timeoutMessage: string,
+	signal: AbortSignal,
+): AsyncGenerator<T> {
+	const iterator = stream[Symbol.asyncIterator]();
+	try {
+		while (true) {
+			const next = await withAnalysisTimeout(iterator.next(), timeoutMs, timeoutMessage, signal);
+			if (next.done) return;
+			yield next.value;
+		}
+	} finally {
+		await iterator.return?.();
+	}
+}
+
+function limitAnalysisContentForModel(payload: AnalysisContentPayload): AnalysisContentPayload {
+	if (payload.content.length <= MAX_ANALYSIS_CONTENT_CHARS) return payload;
+
+	const retainedContent = payload.content.slice(-MAX_ANALYSIS_CONTENT_CHARS);
+	return {
+		...payload,
+		content: [
+			'分析输入裁剪说明：为避免模型长时间无响应，已裁剪过长输入。',
+			`原始预处理内容长度 ${payload.content.length.toLocaleString()} 字符；以下仅保留末尾 ${retainedContent.length.toLocaleString()} 字符。`,
+			'分析时只能把下面保留的原始内容作为证据，不要引用本说明。',
+			'',
+			retainedContent,
+		].join('\n'),
+	};
 }
 
 function logLevelClasses(level: LogLevel): string {
@@ -855,6 +968,9 @@ const MAX_REMOTE_PROFILES = 12;
 const MAX_VM_CREDENTIALS = 80;
 const VM_START_IP_REFRESH_ATTEMPTS = 6;
 const VM_START_IP_REFRESH_DELAY_MS = 1200;
+const DEFAULT_RDP_PORT = '3389';
+const DEFAULT_WINRM_PORT = 5985;
+const OPENSSH_SETUP_SCRIPT_URL = '/downloads/configure-windows-ssh-server.ps1';
 
 interface RemoteActionButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
 	icon: string;
@@ -873,9 +989,9 @@ function RemoteActionButton({
 	className = '',
 	...buttonProps
 }: RemoteActionButtonProps) {
-	const sizeClass = size === 'sm' ? 'h-[22px] w-[22px]' : 'h-[26px] w-[26px]';
-	const iconSizeClass = size === 'sm' ? 'h-3 w-3' : 'h-[13px] w-[13px]';
-	const toneClass = tone === 'danger' ? 'text-rose-300/70 hover:text-rose-200' : 'text-white/38 hover:text-white/72';
+	const sizeClass = size === 'sm' ? 'h-6 w-6' : 'h-7 w-7';
+	const iconSizeClass = size === 'sm' ? 'h-3.5 w-3.5' : 'h-4 w-4';
+	const toneClass = tone === 'danger' ? 'text-rose-400/90 hover:text-rose-300' : 'text-white/48 hover:text-white/78';
 
 	return (
 		<button
@@ -898,6 +1014,10 @@ function normalizePort(portValue: string): string {
 	return portValue.trim() || '22';
 }
 
+function normalizeRdpPort(portValue: string | undefined): string {
+	return String(portValue ?? '').trim() || DEFAULT_RDP_PORT;
+}
+
 function profileId(hostValue: string, portValue: string, usernameValue: string): string {
 	return `${usernameValue.trim().toLowerCase()}@${hostValue.trim().toLowerCase()}:${normalizePort(portValue)}`;
 }
@@ -917,12 +1037,14 @@ function parseProfiles(raw: string | null): RemoteMachineProfile[] {
 				const hostValue = String(item.host ?? '').trim();
 				const usernameValue = String(item.username ?? '').trim();
 				const portValue = normalizePort(String(item.port ?? '22'));
+				const rdpPortValue = normalizeRdpPort(item.rdpPort);
 				if (!hostValue || !usernameValue) return null;
 				const profile: RemoteMachineProfile = {
 					id: String(item.id ?? profileId(hostValue, portValue, usernameValue)),
 					label: String(item.label ?? ''),
 					host: hostValue,
 					port: portValue,
+					rdpPort: rdpPortValue,
 					username: usernameValue,
 					password: String(item.password ?? ''),
 					lastConnectedAt: String(item.lastConnectedAt ?? ''),
@@ -939,6 +1061,7 @@ function parseProfiles(raw: string | null): RemoteMachineProfile[] {
 function buildProfile(
 	hostValue: string,
 	portValue: string,
+	rdpPortValue: string,
 	usernameValue: string,
 	passwordValue: string,
 	existing?: RemoteMachineProfile,
@@ -950,6 +1073,7 @@ function buildProfile(
 		label: labelValue?.trim() || existing?.label || '',
 		host: hostValue.trim(),
 		port: normalizedPort,
+		rdpPort: normalizeRdpPort(rdpPortValue || existing?.rdpPort),
 		username: usernameValue.trim(),
 		password: passwordValue,
 		lastConnectedAt: new Date().toISOString(),
@@ -1119,6 +1243,7 @@ export function RemoteMachineView() {
 	const [profileName, setProfileName] = useState('');
 	const [host, setHost] = useState('');
 	const [port, setPort] = useState('22');
+	const [rdpPort, setRdpPort] = useState(DEFAULT_RDP_PORT);
 	const [username, setUsername] = useState('');
 	const [password, setPassword] = useState('');
 	const [connStatus, setConnStatus] = useState<ConnStatus>('idle');
@@ -1132,6 +1257,14 @@ export function RemoteMachineView() {
 	const [vmCredentials, setVmCredentials] = useState<Record<string, HyperVVmCredentialProfile>>({});
 	const [vmPowerBusyKey, setVmPowerBusyKey] = useState<string | null>(null);
 	const [fetchingVmIpKey, setFetchingVmIpKey] = useState<string | null>(null);
+	const [rdpOpeningTarget, setRdpOpeningTarget] = useState<string | null>(null);
+	const [winRmBusyTargetKey, setWinRmBusyTargetKey] = useState<string | null>(null);
+	const [winRmTerminalOpen, setWinRmTerminalOpen] = useState(false);
+	const [winRmTerminalStatus, setWinRmTerminalStatus] = useState<WinRmTerminalStatus>('idle');
+	const [winRmTerminalLines, setWinRmTerminalLines] = useState<WinRmTerminalLine[]>([]);
+	const [winRmRunId, setWinRmRunId] = useState<string | null>(null);
+	const winRmRunIdRef = useRef<string | null>(null);
+	const winRmTerminalScrollRef = useRef<HTMLDivElement | null>(null);
 
 	// 在线连接池
 	const [connections, setConnections] = useState<RemoteConnection[]>([]);
@@ -1228,6 +1361,53 @@ export function RemoteMachineView() {
 	}, []);
 
 	useEffect(() => {
+		winRmRunIdRef.current = winRmRunId;
+	}, [winRmRunId]);
+
+	useEffect(() => {
+		let cancelled = false;
+		let unlisten: (() => void) | null = null;
+		void subscribeWinRmOpenSshSetupOutput((payload) => {
+			if (payload.runId !== winRmRunIdRef.current) return;
+
+			const text = payload.line || payload.error || '';
+			if (text) {
+				setWinRmTerminalLines((current) =>
+					[
+						...current,
+						{
+							id: `${payload.runId}:${current.length}:${Date.now()}`,
+							stream: payload.stream,
+							text,
+						},
+					].slice(-500),
+				);
+			}
+
+			if (payload.done) {
+				const failed = !!payload.error || payload.stream === 'error' || (payload.exitCode ?? 0) !== 0;
+				setWinRmTerminalStatus(failed ? 'error' : 'done');
+				setWinRmBusyTargetKey(null);
+			}
+		})
+			.then((dispose) => {
+				if (cancelled) dispose();
+				else unlisten = dispose;
+			})
+			.catch(() => {});
+
+		return () => {
+			cancelled = true;
+			if (unlisten) unlisten();
+		};
+	}, []);
+
+	useEffect(() => {
+		if (!winRmTerminalOpen) return;
+		winRmTerminalScrollRef.current?.scrollTo({ top: winRmTerminalScrollRef.current.scrollHeight });
+	}, [winRmTerminalLines, winRmTerminalOpen]);
+
+	useEffect(() => {
 		let cancelled = false;
 		getSetting(REMOTE_PROFILES_SETTING_KEY)
 			.then((raw) => {
@@ -1317,6 +1497,7 @@ export function RemoteMachineView() {
 		setProfileName('');
 		setHost('');
 		setPort('22');
+		setRdpPort(DEFAULT_RDP_PORT);
 		setUsername('');
 		setPassword('');
 		setConnError('');
@@ -1329,6 +1510,7 @@ export function RemoteMachineView() {
 		setProfileName(profile.label);
 		setHost(profile.host);
 		setPort(normalizePort(profile.port));
+		setRdpPort(normalizeRdpPort(profile.rdpPort));
 		setUsername(profile.username);
 		setPassword(profile.password);
 		setConnError('');
@@ -1358,7 +1540,7 @@ export function RemoteMachineView() {
 			return;
 		}
 		if (!host.trim() || !username.trim()) return;
-		const nextProfile = buildProfile(host, port, username, password, undefined, profileName);
+		const nextProfile = buildProfile(host, port, rdpPort, username, password, undefined, profileName);
 		upsertProfile(nextProfile, editingProfileId);
 		setConfigOpen(false);
 	}
@@ -1421,6 +1603,19 @@ export function RemoteMachineView() {
 		return vms;
 	}
 
+	function updateVmPowerState(connectionId: string, vm: HyperVVirtualMachine, state: string) {
+		setConnectionHypervVms((prev) => {
+			const vms = prev[connectionId];
+			if (!vms) return prev;
+			return {
+				...prev,
+				[connectionId]: vms.map((item) =>
+					vmIdentity(item) === vmIdentity(vm) ? { ...item, state, status: state } : item,
+				),
+			};
+		});
+	}
+
 	async function waitForVmHost(parentConnection: RemoteConnection, vm: HyperVVirtualMachine) {
 		for (let attempt = 0; attempt < VM_START_IP_REFRESH_ATTEMPTS; attempt += 1) {
 			const refreshedVms = await refreshHyperV(parentConnection.id);
@@ -1436,6 +1631,7 @@ export function RemoteMachineView() {
 		const pendingVm = pendingVmConnection;
 		const hostValue = (profile?.host ?? host).trim();
 		const portValue = normalizePort(profile?.port ?? port);
+		const rdpPortValue = normalizeRdpPort(profile?.rdpPort ?? rdpPort);
 		const usernameValue = (profile?.username ?? username).trim();
 		const passwordValue = profile?.password ?? password;
 		if (!hostValue || !usernameValue) return;
@@ -1447,7 +1643,8 @@ export function RemoteMachineView() {
 		setConnectingVmKey(pendingVm?.credentialKey ?? null);
 		try {
 			const baseProfile =
-				profile ?? buildProfile(hostValue, portValue, usernameValue, passwordValue, undefined, profileName);
+				profile ??
+				buildProfile(hostValue, portValue, rdpPortValue, usernameValue, passwordValue, undefined, profileName);
 			const connection = await sshConnect({
 				host: hostValue,
 				port: Number(portValue),
@@ -1472,6 +1669,7 @@ export function RemoteMachineView() {
 					buildProfile(
 						hostValue,
 						portValue,
+						rdpPortValue,
 						usernameValue,
 						passwordValue,
 						profile,
@@ -1759,9 +1957,24 @@ export function RemoteMachineView() {
 		setAnalysisResults((current) => current.map((result) => (result.path === path ? updater(result) : result)));
 	}
 
-	async function readAnalysisContent(path: string, connectionId: string): Promise<string> {
-		if (path === selectedFile && !fileReadError && editorDraft.trim()) return editorDraft;
-		return readRemoteFileWithRetry(connectionId, path);
+	function getAnalysisFileSizeError(path: string): string {
+		const size = analysisFileSizeByPath.get(path);
+		const usesLoadedDraft = path === selectedFile && !fileReadError && !!editorDraft.trim();
+		if (usesLoadedDraft || size == null || size <= MAX_ANALYSIS_REMOTE_FILE_BYTES) return '';
+		return `文件过大（${formatSize(size)}），为避免远程读取长时间卡住，Analyze 队列仅直接读取 ${formatSize(MAX_ANALYSIS_REMOTE_FILE_BYTES)} 以内的文件。请先打开该文件并使用过滤后的当前内容分析，或缩小日志范围后重试。`;
+	}
+
+	async function readAnalysisContent(path: string, connectionId: string, signal: AbortSignal): Promise<string> {
+		if (path === selectedFile && !fileReadError && editorDraft.trim()) {
+			if (signal.aborted) throw new AnalysisAbortError('分析已停止。');
+			return editorDraft;
+		}
+		return withAnalysisTimeout(
+			readRemoteFileWithRetry(connectionId, path),
+			ANALYSIS_READ_TIMEOUT_MS,
+			`远程文件读取超过 ${ANALYSIS_READ_TIMEOUT_MS / 1000} 秒，已停止本次分析。请确认 SSH/SFTP 连接是否正常，或先缩小日志文件后重试。`,
+			signal,
+		);
 	}
 
 	async function startFileAnalysis() {
@@ -1770,7 +1983,9 @@ export function RemoteMachineView() {
 				analysisAbortControllersRef.current[path]?.abort();
 				delete analysisAbortControllersRef.current[path];
 				updateAnalysisResult(path, (result) =>
-					result.status === 'pending' || result.status === 'running' ? { ...result, status: 'aborted' } : result,
+					result.status === 'pending' || result.status === 'running'
+						? { ...result, status: 'aborted', statusDetail: '已停止' }
+						: result,
 				);
 			}
 			return;
@@ -1782,73 +1997,100 @@ export function RemoteMachineView() {
 		const targetPaths = [...analysisTargetPaths];
 		const connectionId = activeConnectionId;
 		const provider = selectedAnalysisProvider;
+		const targetErrors = new Map(targetPaths.map((path) => [path, getAnalysisFileSizeError(path)]));
+		const runnablePaths = targetPaths.filter((path) => !targetErrors.get(path));
 		setAnalysisModelOpen(false);
 		setAnalysisError('');
 		setAnalysisResults((current) =>
 			[
 				...current.filter((result) => !targetPaths.includes(result.path)),
-				...targetPaths.map((path) => ({
-					path,
-					displayPath: sftpToDisplay(path),
-					status: 'pending' as AnalysisFileStatus,
-					language: 'ch' as AnalysisLanguage,
-					output: '',
-					error: '',
-					stats: null,
-					isFilteredLog: false,
-				})),
+				...targetPaths.map((path) => {
+					const error = targetErrors.get(path) ?? '';
+					return {
+						path,
+						displayPath: sftpToDisplay(path),
+						status: error ? ('error' as AnalysisFileStatus) : ('pending' as AnalysisFileStatus),
+						statusDetail: error ? '文件过大，未读取' : '等待分析任务启动',
+						language: 'ch' as AnalysisLanguage,
+						output: '',
+						error,
+						stats: null,
+						isFilteredLog: false,
+					};
+				}),
 			].sort((a, b) => a.displayPath.localeCompare(b.displayPath)),
 		);
 
+		if (runnablePaths.length === 0) return;
+
 		try {
 			await Promise.all(
-				targetPaths.map(async (path) => {
+				runnablePaths.map(async (path) => {
 					const controller = new AbortController();
 					analysisAbortControllersRef.current[path] = controller;
-					updateAnalysisResult(path, (result) => ({ ...result, status: 'running' }));
+					updateAnalysisResult(path, (result) => ({ ...result, status: 'running', statusDetail: '正在读取远程文件' }));
 
 					try {
-						const rawContent = await readAnalysisContent(path, connectionId);
+						const rawContent = await readAnalysisContent(path, connectionId, controller.signal);
 						if (controller.signal.aborted) {
-							updateAnalysisResult(path, (result) => ({ ...result, status: 'aborted' }));
+							updateAnalysisResult(path, (result) => ({ ...result, status: 'aborted', statusDetail: '已停止' }));
 							return;
 						}
 						if (!rawContent.trim()) {
 							updateAnalysisResult(path, (result) => ({
 								...result,
 								status: 'error',
+								statusDetail: '文件为空',
 								error: '当前文件内容为空，未发起分析。',
 							}));
 							return;
 						}
 
-						const analysisContent = buildAnalysisContent(path, rawContent);
-						updateAnalysisResult(path, (result) => ({ ...result, isFilteredLog: analysisContent.isFilteredLog }));
+						updateAnalysisResult(path, (result) => ({ ...result, statusDetail: '正在预处理日志内容' }));
+						const analysisContent = limitAnalysisContentForModel(buildAnalysisContent(path, rawContent));
+						updateAnalysisResult(path, (result) => ({
+							...result,
+							isFilteredLog: analysisContent.isFilteredLog,
+							statusDetail: '等待模型响应',
+						}));
 						const messages = buildAnalysisMessages(
 							sftpToDisplay(path),
 							analysisContent.content,
 							analysisContent.isFilteredLog,
 						);
 
-						for await (const chunk of streamChat(provider, messages, controller.signal)) {
+						for await (const chunk of withAnalysisStreamIdleTimeout(
+							streamChat(provider, messages, controller.signal),
+							ANALYSIS_STREAM_IDLE_TIMEOUT_MS,
+							`模型超过 ${ANALYSIS_STREAM_IDLE_TIMEOUT_MS / 1000} 秒没有返回新内容，已停止本次分析。请检查模型服务状态或换用更小的日志范围。`,
+							controller.signal,
+						)) {
 							if (controller.signal.aborted) {
-								updateAnalysisResult(path, (result) => ({ ...result, status: 'aborted' }));
+								updateAnalysisResult(path, (result) => ({ ...result, status: 'aborted', statusDetail: '已停止' }));
 								return;
 							}
 							if (chunk.content) {
-								updateAnalysisResult(path, (result) => ({ ...result, output: result.output + chunk.content }));
+								updateAnalysisResult(path, (result) => ({
+									...result,
+									statusDetail: '模型正在生成结果',
+									output: result.output + chunk.content,
+								}));
 							}
 							if (chunk.stats) {
 								updateAnalysisResult(path, (result) => ({ ...result, stats: chunk.stats ?? null }));
 							}
 						}
 
-						updateAnalysisResult(path, (result) => ({ ...result, status: 'done' }));
+						updateAnalysisResult(path, (result) => ({ ...result, status: 'done', statusDetail: '分析完成' }));
 					} catch (err: unknown) {
+						const timedOut = err instanceof AnalysisTimeoutError;
+						if (timedOut) controller.abort();
+						const aborted = !timedOut && (controller.signal.aborted || err instanceof AnalysisAbortError);
 						updateAnalysisResult(path, (result) => ({
 							...result,
-							status: controller.signal.aborted ? 'aborted' : 'error',
-							error: controller.signal.aborted ? '' : String(err),
+							status: aborted ? 'aborted' : 'error',
+							statusDetail: aborted ? '已停止' : '分析失败',
+							error: aborted ? '' : analysisErrorMessage(err),
 						}));
 					} finally {
 						if (analysisAbortControllersRef.current[path] === controller) {
@@ -2003,18 +2245,137 @@ export function RemoteMachineView() {
 		return vm.state.trim().toLowerCase() === 'running';
 	}
 
+	function vmPowerAction(vm: HyperVVirtualMachine): 'start' | 'stop' {
+		const state = vm.state.trim().toLowerCase();
+		return state === 'off' || state === 'offcritical' ? 'start' : 'stop';
+	}
+
+	function downloadOpenSshSetupScript() {
+		const link = document.createElement('a');
+		link.href = OPENSSH_SETUP_SCRIPT_URL;
+		link.download = 'configure-windows-ssh-server.ps1';
+		document.body.appendChild(link);
+		link.click();
+		link.remove();
+	}
+
+	function appendWinRmTerminalLine(stream: WinRmTerminalLine['stream'], text: string) {
+		setWinRmTerminalLines((current) =>
+			[
+				...current,
+				{
+					id: `local:${current.length}:${Date.now()}`,
+					stream,
+					text,
+				},
+			].slice(-500),
+		);
+	}
+
+	async function handleRunOpenSshSetupViaWinRm(target: WinRmOpenSshSetupTarget) {
+		if (winRmBusyTargetKey) return;
+		const hostValue = target.host.trim();
+		const usernameValue = target.username?.trim() ?? '';
+		const passwordValue = target.password ?? '';
+		const sshPortValue = Number(normalizePort(target.sshPort ?? '22'));
+
+		if (!hostValue || !usernameValue || !passwordValue) {
+			setConnError('通过 WinRM 执行 SSH 配置需要保存目标主机、账号和密码。');
+			setWinRmTerminalOpen(true);
+			setWinRmTerminalStatus('error');
+			setWinRmTerminalLines([
+				{
+					id: `local:error:${Date.now()}`,
+					stream: 'error',
+					text: '[local] Missing host, username, or saved password for WinRM execution.',
+				},
+			]);
+			return;
+		}
+
+		const runId = `open-ssh:${target.key}:${Date.now()}`;
+		setWinRmRunId(runId);
+		winRmRunIdRef.current = runId;
+		setWinRmBusyTargetKey(target.key);
+		setWinRmTerminalOpen(true);
+		setWinRmTerminalStatus('running');
+		setWinRmTerminalLines([
+			{
+				id: `local:start:${Date.now()}`,
+				stream: 'status',
+				text: `[local] Run ${runId}`,
+			},
+			{
+				id: `local:target:${Date.now()}`,
+				stream: 'status',
+				text: `[local] Target ${target.label} (${usernameValue}@${hostValue}) via WinRM ${DEFAULT_WINRM_PORT}; SSH port ${sshPortValue}`,
+			},
+		]);
+		setConnError('');
+
+		try {
+			await winRmRunOpenSshSetup({
+				runId,
+				host: hostValue,
+				winrmPort: DEFAULT_WINRM_PORT,
+				username: usernameValue,
+				password: passwordValue,
+				sshPort: sshPortValue,
+				firewallProfile: 'Any',
+				setNetworkPrivate: true,
+				enablePasswordAuthentication: true,
+			});
+		} catch (err: unknown) {
+			const message = String(err);
+			appendWinRmTerminalLine('error', `[local] ${message}`);
+			setConnError(message);
+			setWinRmTerminalStatus('error');
+			setWinRmBusyTargetKey(null);
+		}
+	}
+
+	function hostProfileForConnection(connection: RemoteConnection): RemoteMachineProfile | undefined {
+		return profiles.find((profile) => profile.id === connection.parentProfileId);
+	}
+
+	async function handleOpenRdp(hostValue: string, portValue: string, busyKey: string, credential?: RdpCredential) {
+		const normalizedHost = hostValue.trim();
+		if (!normalizedHost || rdpOpeningTarget === busyKey) return;
+		const normalizedPort = Number(normalizeRdpPort(portValue));
+		if (!Number.isInteger(normalizedPort) || normalizedPort < 1 || normalizedPort > 65535) {
+			setConnError('RDP 端口必须在 1-65535 之间。');
+			return;
+		}
+
+		setRdpOpeningTarget(busyKey);
+		setConnError('');
+		try {
+			await rdpOpen({
+				host: normalizedHost,
+				port: normalizedPort,
+				username: credential?.username?.trim() || undefined,
+				password: credential?.password || undefined,
+			});
+		} catch (err: unknown) {
+			setConnError(String(err));
+		} finally {
+			setRdpOpeningTarget((current) => (current === busyKey ? null : current));
+		}
+	}
+
 	async function handleToggleVmPower(parentConnection: RemoteConnection, vm: HyperVVirtualMachine) {
-		const action = isVmRunning(vm) ? 'stop' : 'start';
+		const action = vmPowerAction(vm);
 		const busyKey = `${parentConnection.id}:${vmIdentity(vm)}:power`;
 		setVmPowerBusyKey(busyKey);
+		updateVmPowerState(parentConnection.id, vm, action === 'start' ? 'Starting' : 'Stopping');
 		try {
 			setConnError('');
 			await sshSetHyperVVMState(parentConnection.id, vm.id, action);
-			await refreshHyperV(parentConnection.id);
 		} catch (err: unknown) {
 			setConnError(String(err));
 		} finally {
 			setVmPowerBusyKey((current) => (current === busyKey ? null : current));
+			void refreshHyperV(parentConnection.id);
 		}
 	}
 
@@ -2028,7 +2389,15 @@ export function RemoteMachineView() {
 		? (connections.find((connection) => connection.id === activeConnectionId) ?? null)
 		: null;
 	const activeDiskRoots = activeConnectionId ? (connectionDisks[activeConnectionId] ?? []) : [];
-	const activeTrees = activeConnectionId ? (connectionTrees[activeConnectionId] ?? {}) : {};
+	const activeTrees = useMemo(
+		() => (activeConnectionId ? (connectionTrees[activeConnectionId] ?? EMPTY_TREE_RECORD) : EMPTY_TREE_RECORD),
+		[activeConnectionId, connectionTrees],
+	);
+	const analysisFileSizeByPath = useMemo(() => {
+		const sizes = new Map<string, number | null>();
+		Object.values(activeTrees).forEach((nodes) => collectTreeFileSizes(nodes, sizes));
+		return sizes;
+	}, [activeTrees]);
 	const activeDiskExpanded = activeConnectionId ? (connectionDiskExpanded[activeConnectionId] ?? {}) : {};
 	const hostConnections = connections.filter((connection) => connection.kind === 'host');
 	const isConnecting = connStatus === 'connecting';
@@ -2042,9 +2411,12 @@ export function RemoteMachineView() {
 	);
 	const hasCheckedAnalysisFiles = analysisSelectedFiles.length > 0;
 	const canOpenAnalysis =
-		analysisTargetPaths.length > 0 && (currentTargetsAnalyzing || hasCheckedAnalysisFiles || (!loadingFile && !fileReadError));
+		analysisTargetPaths.length > 0 &&
+		(currentTargetsAnalyzing || hasCheckedAnalysisFiles || (!loadingFile && !fileReadError));
 	const canStartAnalysis =
-		canOpenAnalysis && !!selectedAnalysisProvider && (currentTargetsAnalyzing || hasCheckedAnalysisFiles || !!editorDraft.trim());
+		canOpenAnalysis &&
+		!!selectedAnalysisProvider &&
+		(currentTargetsAnalyzing || hasCheckedAnalysisFiles || !!editorDraft.trim());
 	const analysisButtonTitle =
 		analysisTargetPaths.length === 0
 			? '请先选择或勾选远程文件'
@@ -2061,20 +2433,22 @@ export function RemoteMachineView() {
 			? '请先选择或勾选远程文件'
 			: currentTargetsAnalyzing
 				? '停止当前文件分析'
-			: !hasCheckedAnalysisFiles && loadingFile
-				? '文件加载中'
-				: !hasCheckedAnalysisFiles && fileReadError
-					? '当前文件读取失败'
-					: !hasCheckedAnalysisFiles && !editorDraft.trim()
-						? '当前文件内容为空'
-						: '开始分析';
+				: !hasCheckedAnalysisFiles && loadingFile
+					? '文件加载中'
+					: !hasCheckedAnalysisFiles && fileReadError
+						? '当前文件读取失败'
+						: !hasCheckedAnalysisFiles && !editorDraft.trim()
+							? '当前文件内容为空'
+							: '开始分析';
 	const analysisTargetLabel = hasCheckedAnalysisFiles
 		? `${analysisSelectedFiles.length.toLocaleString()} 个文件已加入 Analyze 队列`
 		: selectedFile
 			? sftpToDisplay(selectedFile)
 			: '未选择文件';
 	const analysisStatusLabel = (() => {
-		const activeResults = analysisResults.filter((result) => result.status === 'pending' || result.status === 'running');
+		const activeResults = analysisResults.filter(
+			(result) => result.status === 'pending' || result.status === 'running',
+		);
 		if (activeResults.length === 1) return activeResults[0].displayPath;
 		if (activeResults.length > 1) return `${activeResults.length.toLocaleString()} 个文件正在分析`;
 		return analysisTargetLabel;
@@ -2100,6 +2474,19 @@ export function RemoteMachineView() {
 					</div>
 				</div>
 				<div className="flex items-center gap-2">
+					<button
+						type="button"
+						onClick={downloadOpenSshSetupScript}
+						title="Download OpenSSH setup script"
+						className="flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium text-white/65 transition-all hover:text-white"
+						style={{
+							background: 'rgb(var(--glass-rgb) / 0.08)',
+							border: '1px solid rgb(255 255 255 / 0.12)',
+						}}
+					>
+						<Icon name="download" className="h-3.5 w-3.5" aria-hidden="true" />
+						Script
+					</button>
 					<button
 						type="button"
 						onClick={openAnalysisModal}
@@ -2175,7 +2562,9 @@ export function RemoteMachineView() {
 										autoFocus
 									/>
 								</div>
-								<div className="grid grid-cols-[1fr_64px] gap-2">
+								<div
+									className={`grid gap-2 ${isVmCredentialForm ? 'grid-cols-[1fr_64px]' : 'grid-cols-[1fr_64px_72px]'}`}
+								>
 									<div className="space-y-1">
 										<label className="text-[11px] text-white/45">IP / 主机名</label>
 										<input
@@ -2194,7 +2583,7 @@ export function RemoteMachineView() {
 										{isFetchingVmIp && <div className="mt-1 text-[10px] text-white/30">正在获取 IP…</div>}
 									</div>
 									<div className="space-y-1">
-										<label className="text-[11px] text-white/45">端口</label>
+										<label className="text-[11px] text-white/45">SSH</label>
 										<input
 											className={fieldCls}
 											placeholder="22"
@@ -2202,6 +2591,17 @@ export function RemoteMachineView() {
 											onChange={(e) => setPort(e.target.value)}
 										/>
 									</div>
+									{!isVmCredentialForm && (
+										<div className="space-y-1">
+											<label className="text-[11px] text-white/45">RDP</label>
+											<input
+												className={fieldCls}
+												placeholder={DEFAULT_RDP_PORT}
+												value={rdpPort}
+												onChange={(e) => setRdpPort(e.target.value)}
+											/>
+										</div>
+									)}
 								</div>
 								<div className="space-y-2.5">
 									<div className="space-y-1">
@@ -2300,10 +2700,7 @@ export function RemoteMachineView() {
 								<div className="min-w-0">
 									<div className="text-[11px] text-white/35">Remote File Analysis</div>
 									<h2 className="truncate text-base font-semibold text-white/80">文件内容分析</h2>
-									<div
-										className="mt-1 truncate font-mono text-[11px] text-white/35"
-										title={analysisStatusLabel}
-									>
+									<div className="mt-1 truncate font-mono text-[11px] text-white/35" title={analysisStatusLabel}>
 										{analysisStatusLabel}
 									</div>
 								</div>
@@ -2430,30 +2827,40 @@ export function RemoteMachineView() {
 														: 'bg-emerald-400/10 text-emerald-200';
 
 											return (
-												<div key={result.path} className="overflow-hidden rounded-xl border border-white/[0.06] bg-white/[0.025]">
+												<div
+													key={result.path}
+													className="overflow-hidden rounded-xl border border-white/[0.06] bg-white/[0.025]"
+												>
 													<div className="flex items-center gap-2 border-b border-white/[0.05] px-3 py-2">
 														{active && (
-															<Icon name="loader" className="h-3.5 w-3.5 shrink-0 animate-spin text-white/35" aria-hidden="true" />
+															<Icon
+																name="loader"
+																className="h-3.5 w-3.5 shrink-0 animate-spin text-white/35"
+																aria-hidden="true"
+															/>
 														)}
-														<span className="min-w-0 flex-1 truncate font-mono text-[11px] text-white/45" title={result.displayPath}>
+														<span
+															className="min-w-0 flex-1 truncate font-mono text-[11px] text-white/45"
+															title={result.displayPath}
+														>
 															{result.displayPath}
 														</span>
-															<div className="flex shrink-0 overflow-hidden rounded-md bg-white/[0.04] p-0.5 ring-1 ring-white/[0.06]">
-																{(['en', 'ch'] as AnalysisLanguage[]).map((language) => (
-																	<button
-																		key={language}
-																		type="button"
-																		onClick={() => updateAnalysisResult(result.path, (item) => ({ ...item, language }))}
-																		className={`h-5 min-w-8 rounded px-1.5 text-[10px] font-medium transition-colors ${
-																			result.language === language
-																				? 'bg-white/[0.1] text-white/80'
-																				: 'text-white/35 hover:text-white/65'
-																		}`}
-																	>
-																		{language === 'en' ? 'EN' : 'CH'}
-																	</button>
-																))}
-															</div>
+														<div className="flex shrink-0 overflow-hidden rounded-md bg-white/[0.04] p-0.5 ring-1 ring-white/[0.06]">
+															{(['en', 'ch'] as AnalysisLanguage[]).map((language) => (
+																<button
+																	key={language}
+																	type="button"
+																	onClick={() => updateAnalysisResult(result.path, (item) => ({ ...item, language }))}
+																	className={`h-5 min-w-8 rounded px-1.5 text-[10px] font-medium transition-colors ${
+																		result.language === language
+																			? 'bg-white/[0.1] text-white/80'
+																			: 'text-white/35 hover:text-white/65'
+																	}`}
+																>
+																	{language === 'en' ? 'EN' : 'CH'}
+																</button>
+															))}
+														</div>
 														{result.isFilteredLog && (
 															<span className="shrink-0 rounded-md bg-sky-400/10 px-1.5 py-0.5 text-[10px] text-sky-200">
 																CMTrace
@@ -2479,9 +2886,7 @@ export function RemoteMachineView() {
 																</div>
 															)
 														) : (
-															<div className="py-6 text-center text-[12px] text-white/30">
-																{result.status === 'pending' ? '等待分析任务启动' : '正在读取并分析文件'}
-															</div>
+															<div className="py-6 text-center text-[12px] text-white/30">{result.statusDetail}</div>
 														)}
 													</div>
 												</div>
@@ -2536,11 +2941,15 @@ export function RemoteMachineView() {
 						)}
 						<span className="min-w-0 flex-1">
 							<span className="block text-[12px] font-medium text-white/70">
-								{isAnalyzing ? '文件分析中' : analysisError ? '分析出错' : analysisResults.length > 0 ? '分析结果' : '文件内容分析'}
+								{isAnalyzing
+									? '文件分析中'
+									: analysisError
+										? '分析出错'
+										: analysisResults.length > 0
+											? '分析结果'
+											: '文件内容分析'}
 							</span>
-							<span className="block truncate font-mono text-[10px] text-white/35">
-								{analysisStatusLabel}
-							</span>
+							<span className="block truncate font-mono text-[10px] text-white/35">{analysisStatusLabel}</span>
 						</span>
 					</motion.button>
 				)}
@@ -2564,6 +2973,10 @@ export function RemoteMachineView() {
 								<div className="space-y-1.5">
 									{profiles.map((profile) => {
 										const isProfileConnecting = connectingProfileId === profile.id;
+										const profileWinRmKey = `host:${profile.id}:winrm`;
+										const isProfileWinRmRunning = winRmBusyTargetKey === profileWinRmKey;
+										const profileRdpKey = `host:${profile.id}`;
+										const isProfileRdpOpening = rdpOpeningTarget === profileRdpKey;
 										const hostConnection =
 											hostConnections.find((connection) => connection.parentProfileId === profile.id) ?? null;
 										const hostActive = activeConnectionId === hostConnection?.id;
@@ -2580,7 +2993,7 @@ export function RemoteMachineView() {
 															: 'border-white/[0.06] bg-white/[0.025]'
 												}`}
 											>
-												<div className="flex items-center gap-1.5">
+												<div className="flex items-center gap-0.5">
 													<button
 														type="button"
 														title={`${profile.username}@${profile.host}:${normalizePort(profile.port)}`}
@@ -2594,6 +3007,36 @@ export function RemoteMachineView() {
 													>
 														<span className="block truncate text-[12px] font-medium">{profileLabel(profile)}</span>
 													</button>
+													<RemoteActionButton
+														icon={isProfileRdpOpening ? 'loader' : 'monitor'}
+														label={isProfileRdpOpening ? 'Opening RDP' : 'Open RDP'}
+														spinning={isProfileRdpOpening}
+														onClick={() =>
+															void handleOpenRdp(
+																profile.host,
+																normalizeRdpPort(profile.rdpPort),
+																profileRdpKey,
+																profile,
+															)
+														}
+														disabled={!profile.host.trim() || (!!rdpOpeningTarget && !isProfileRdpOpening)}
+													/>
+													<RemoteActionButton
+														icon={isProfileWinRmRunning ? 'loader' : 'gear'}
+														label={isProfileWinRmRunning ? 'Running SSH setup via WinRM' : 'Run SSH setup via WinRM'}
+														spinning={isProfileWinRmRunning}
+														onClick={() =>
+															void handleRunOpenSshSetupViaWinRm({
+																key: profileWinRmKey,
+																label: profileLabel(profile),
+																host: profile.host,
+																username: profile.username,
+																password: profile.password,
+																sshPort: profile.port,
+															})
+														}
+														disabled={!!winRmBusyTargetKey && !isProfileWinRmRunning}
+													/>
 													<RemoteActionButton
 														icon={hostConnection ? 'plug-off' : isProfileConnecting ? 'loader' : 'plug'}
 														label={hostConnection ? 'Disconnect' : isProfileConnecting ? 'Connecting' : 'Connect'}
@@ -2646,7 +3089,7 @@ export function RemoteMachineView() {
 																	animate={{ height: 'auto', opacity: 1 }}
 																	exit={{ height: 0, opacity: 0 }}
 																	transition={{ duration: 0.18, ease: 'easeInOut' }}
-																	className="overflow-hidden pl-3"
+																	className="overflow-hidden"
 																>
 																	{hostVms.map((vm) => {
 																		const vmHost = pickVmHost(vm);
@@ -2661,40 +3104,111 @@ export function RemoteMachineView() {
 																		const vmActive = connectedVm?.id === activeConnectionId;
 																		const vmConnecting = connectingVmKey === vmKey;
 																		const vmPowerBusy = vmPowerBusyKey === vmPowerKey;
+																		const vmPowerNextAction = vmPowerAction(vm);
+																		const vmRdpKey = `vm:${hostConnection.id}:${vmIdentity(vm)}`;
+																		const isVmRdpOpening = rdpOpeningTarget === vmRdpKey;
+																		const vmWinRmKey = `vm:${hostConnection.id}:${vmIdentity(vm)}:winrm`;
+																		const isVmWinRmRunning = winRmBusyTargetKey === vmWinRmKey;
+																		const parentProfile = hostProfileForConnection(hostConnection);
+																		const savedVmCredential = findVmCredential(hostConnection, vm, vmHost ?? '');
+																		const vmRdpCredential = savedVmCredential?.username
+																			? savedVmCredential
+																			: parentProfile;
+																		const vmWinRmCredential = savedVmCredential?.username
+																			? savedVmCredential
+																			: parentProfile;
 																		return (
 																			<div
 																				key={vmKey}
-																				className={`mt-1 rounded-lg p-1.5 transition-colors ${
+																				className={`mt-0.5 rounded-lg border px-1 py-0.5 transition-colors ${
 																					connectedVm
-																						? 'remote-connected-item bg-emerald-500/[0.035]'
+																						? 'remote-connected-item border-emerald-400/55 bg-emerald-500/[0.035]'
 																						: vmActive
-																							? 'bg-white/[0.07]'
-																							: 'bg-white/[0.025]'
+																							? 'border-white/[0.12] bg-white/[0.07]'
+																							: 'border-transparent bg-white/[0.025]'
 																				}`}
 																			>
-																				<div className="flex items-center gap-1.5">
+																				<div className="flex items-center gap-0.5">
 																					<button
 																						type="button"
+																						title={vm.name}
 																						onClick={() => {
 																							if (connectedVm) switchActiveConnection(connectedVm.id);
 																						}}
 																						disabled={!connectedVm}
-																						className={`min-w-0 flex-1 rounded-md px-1.5 py-1 text-left transition-colors disabled:cursor-default ${
+																						className={`min-w-0 flex-1 rounded-md px-0.5 py-0.5 text-left transition-colors disabled:cursor-default ${
 																							vmActive ? 'bg-white/10 text-white' : 'text-white/55'
 																						}`}
 																					>
-																						<span className="block truncate text-[11px] font-medium">{vm.name}</span>
+																						<span className="block truncate whitespace-nowrap text-[11px] font-medium leading-none">
+																							{vm.name}
+																						</span>
 																					</button>
 																					<RemoteActionButton
-																						icon={vmPowerBusy ? 'loader' : isVmRunning(vm) ? 'stop' : 'play'}
+																						icon={
+																							vmPowerBusy ? 'loader' : vmPowerNextAction === 'stop' ? 'stop' : 'play'
+																						}
 																						label={
-																							vmPowerBusy ? 'Power state updating' : isVmRunning(vm) ? 'Stop' : 'Start'
+																							vmPowerBusy
+																								? 'Power state updating'
+																								: vmPowerNextAction === 'stop'
+																									? 'Stop'
+																									: 'Start'
 																						}
 																						size="sm"
-																						tone={isVmRunning(vm) ? 'danger' : 'default'}
+																						tone={vmPowerNextAction === 'stop' ? 'danger' : 'default'}
 																						spinning={vmPowerBusy}
 																						onClick={() => void handleToggleVmPower(hostConnection, vm)}
 																						disabled={vmPowerBusy}
+																					/>
+																					<RemoteActionButton
+																						icon={isVmRdpOpening ? 'loader' : 'monitor'}
+																						label={
+																							isVmRdpOpening
+																								? 'Opening RDP'
+																								: vmHost
+																									? 'Open RDP'
+																									: 'No usable VM IP address'
+																						}
+																						size="sm"
+																						spinning={isVmRdpOpening}
+																						onClick={() =>
+																							void handleOpenRdp(
+																								vmHost ?? '',
+																								normalizeRdpPort(parentProfile?.rdpPort),
+																								vmRdpKey,
+																								vmRdpCredential,
+																							)
+																						}
+																						disabled={!vmHost || (!!rdpOpeningTarget && !isVmRdpOpening)}
+																					/>
+																					<RemoteActionButton
+																						icon={isVmWinRmRunning ? 'loader' : 'gear'}
+																						label={
+																							isVmWinRmRunning
+																								? 'Running SSH setup via WinRM'
+																								: vmHost
+																									? 'Run SSH setup via WinRM'
+																									: 'No usable VM IP address'
+																						}
+																						size="sm"
+																						spinning={isVmWinRmRunning}
+																						onClick={() =>
+																							void handleRunOpenSshSetupViaWinRm({
+																								key: vmWinRmKey,
+																								label: vm.name,
+																								host: vmHost ?? '',
+																								username: vmWinRmCredential?.username,
+																								password: vmWinRmCredential?.password,
+																								sshPort: vmWinRmCredential?.port ?? '22',
+																							})
+																						}
+																						disabled={
+																							!vmHost ||
+																							!vmWinRmCredential?.username ||
+																							!vmWinRmCredential?.password ||
+																							(!!winRmBusyTargetKey && !isVmWinRmRunning)
+																						}
 																					/>
 																					<RemoteActionButton
 																						icon={connectedVm ? 'plug-off' : vmConnecting ? 'loader' : 'plug'}
@@ -2740,60 +3254,137 @@ export function RemoteMachineView() {
 					</div>
 				</div>
 
-				<div className="glass app-card relative flex min-h-0 flex-col overflow-hidden">
-					<div className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-white/70 to-transparent" />
-					<div className="flex shrink-0 items-center justify-between border-b border-white/[0.06] px-3.5 py-2">
-						<span className="text-xs font-medium text-white/60">文件系统</span>
-						<span className="min-w-0 truncate text-[10px] text-white/25">
-							{activeConnection ? `${activeConnection.label} · ${activeDiskRoots.length} 个磁盘` : '未选择'}
-						</span>
+				<div className="flex min-h-0 flex-col gap-3 overflow-hidden">
+					<div className="glass app-card relative flex min-h-0 flex-1 flex-col overflow-hidden">
+						<div className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-white/70 to-transparent" />
+						<div className="flex shrink-0 items-center justify-between border-b border-white/[0.06] px-3.5 py-2">
+							<span className="text-xs font-medium text-white/60">文件系统</span>
+							<span className="min-w-0 truncate text-[10px] text-white/25">
+								{activeConnection ? `${activeConnection.label} · ${activeDiskRoots.length} 个磁盘` : '未选择'}
+							</span>
+						</div>
+						<div className="min-h-0 flex-1 overflow-y-auto px-1.5 py-1.5">
+							{!activeConnection ? (
+								<div className="flex h-full min-h-28 items-center justify-center px-5 text-center text-[12px] text-white/25">
+									从远程机器列表选择机器后显示文件树
+								</div>
+							) : (
+								activeDiskRoots.map((disk) => {
+									const expanded = activeDiskExpanded[disk] ?? true;
+									return (
+										<div key={disk} className="mb-1">
+											<button
+												type="button"
+												onClick={() => toggleDiskRoot(disk)}
+												className="mb-0.5 flex w-full items-center gap-1.5 rounded-lg px-2 py-1 text-left text-white/55 transition-colors hover:bg-white/[0.05] hover:text-white/80"
+											>
+												<span className="w-3 text-center text-[10px] text-white/25">{expanded ? '▾' : '▸'}</span>
+												<span className="text-[13px]">💾</span>
+												<span className="min-w-0 flex-1 truncate text-[11px] font-bold">{diskLabel(disk)}</span>
+											</button>
+											<AnimatePresence initial={false}>
+												{expanded && (
+													<motion.div
+														initial={{ height: 0, opacity: 0 }}
+														animate={{ height: 'auto', opacity: 1 }}
+														exit={{ height: 0, opacity: 0 }}
+														transition={{ duration: 0.18, ease: 'easeInOut' }}
+														className="overflow-hidden"
+													>
+														{(activeTrees[disk] ?? []).map((node) => (
+															<TreeItem
+																key={node.path}
+																node={node}
+																depth={0}
+																selected={selectedFile}
+																analysisSelected={analysisSelectedSet}
+																onSelect={handleSelectFile}
+																onToggle={handleToggle}
+																onToggleAnalysis={handleToggleAnalysisFile}
+															/>
+														))}
+													</motion.div>
+												)}
+											</AnimatePresence>
+										</div>
+									);
+								})
+							)}
+						</div>
 					</div>
-					<div className="min-h-0 flex-1 overflow-y-auto px-1.5 py-1.5">
-						{!activeConnection ? (
-							<div className="flex h-full min-h-28 items-center justify-center px-5 text-center text-[12px] text-white/25">
-								从远程机器列表选择机器后显示文件树
-							</div>
-						) : (
-							activeDiskRoots.map((disk) => {
-								const expanded = activeDiskExpanded[disk] ?? true;
-								return (
-									<div key={disk} className="mb-1">
-										<button
-											type="button"
-											onClick={() => toggleDiskRoot(disk)}
-											className="mb-0.5 flex w-full items-center gap-1.5 rounded-lg px-2 py-1 text-left text-white/55 transition-colors hover:bg-white/[0.05] hover:text-white/80"
+
+					<div
+						className={`glass app-card relative shrink-0 overflow-hidden transition-[height] duration-200 ${
+							winRmTerminalOpen ? 'h-48' : 'h-10'
+						}`}
+					>
+						<div className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-white/60 to-transparent" />
+						<div className="flex h-10 items-center gap-2 border-b border-white/[0.05] px-3">
+							<button
+								type="button"
+								onClick={() => setWinRmTerminalOpen((value) => !value)}
+								className="flex min-w-0 flex-1 items-center gap-1.5 text-left text-[11px] font-medium text-white/55 transition-colors hover:text-white/80"
+							>
+								<span className="w-3 text-center text-[10px] text-white/30">{winRmTerminalOpen ? '▾' : '▸'}</span>
+								<Icon name="gear" className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+								<span className="min-w-0 flex-1 truncate">WinRM SSH Setup</span>
+							</button>
+							<span
+								className={`shrink-0 rounded-md px-1.5 py-0.5 text-[10px] ${
+									winRmTerminalStatus === 'running'
+										? 'bg-sky-400/10 text-sky-200'
+										: winRmTerminalStatus === 'done'
+											? 'bg-emerald-400/10 text-emerald-200'
+											: winRmTerminalStatus === 'error'
+												? 'bg-rose-500/10 text-rose-300'
+												: 'bg-white/[0.04] text-white/30'
+								}`}
+							>
+								{winRmTerminalStatus === 'running'
+									? 'Running'
+									: winRmTerminalStatus === 'done'
+										? 'Done'
+										: winRmTerminalStatus === 'error'
+											? 'Failed'
+											: 'Ready'}
+							</span>
+							{winRmTerminalLines.length > 0 && (
+								<button
+									type="button"
+									onClick={() => {
+										setWinRmTerminalLines([]);
+										if (!winRmBusyTargetKey) setWinRmTerminalStatus('idle');
+									}}
+									className="shrink-0 rounded-md px-1.5 py-0.5 text-[10px] text-white/30 transition-colors hover:bg-white/[0.05] hover:text-white/60"
+								>
+									Clear
+								</button>
+							)}
+						</div>
+						{winRmTerminalOpen && (
+							<div
+								ref={winRmTerminalScrollRef}
+								className="remote-file-scrollbar h-[calc(100%-2.5rem)] overflow-y-auto bg-white/[0.22] px-3 py-2 font-mono text-[11px] font-medium leading-relaxed"
+							>
+								{winRmTerminalLines.length === 0 ? (
+									<div className="py-8 text-center text-slate-500">No WinRM output</div>
+								) : (
+									winRmTerminalLines.map((line) => (
+										<div
+											key={line.id}
+											className={`whitespace-pre-wrap break-words ${
+												line.stream === 'stderr' || line.stream === 'error'
+													? 'text-rose-700'
+													: line.stream === 'status'
+														? 'text-cyan-700'
+														: 'text-slate-800'
+											}`}
 										>
-											<span className="w-3 text-center text-[10px] text-white/25">{expanded ? '▾' : '▸'}</span>
-											<span className="text-[13px]">💾</span>
-											<span className="min-w-0 flex-1 truncate text-[11px] font-bold">{diskLabel(disk)}</span>
-										</button>
-										<AnimatePresence initial={false}>
-											{expanded && (
-												<motion.div
-													initial={{ height: 0, opacity: 0 }}
-													animate={{ height: 'auto', opacity: 1 }}
-													exit={{ height: 0, opacity: 0 }}
-													transition={{ duration: 0.18, ease: 'easeInOut' }}
-													className="overflow-hidden"
-												>
-													{(activeTrees[disk] ?? []).map((node) => (
-														<TreeItem
-															key={node.path}
-															node={node}
-															depth={0}
-															selected={selectedFile}
-															analysisSelected={analysisSelectedSet}
-															onSelect={handleSelectFile}
-															onToggle={handleToggle}
-															onToggleAnalysis={handleToggleAnalysisFile}
-														/>
-													))}
-												</motion.div>
-											)}
-										</AnimatePresence>
-									</div>
-								);
-							})
+											{line.text}
+										</div>
+									))
+								)}
+							</div>
 						)}
 					</div>
 				</div>

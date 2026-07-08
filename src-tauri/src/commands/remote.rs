@@ -12,10 +12,12 @@ use russh_sftp::client::SftpSession;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
+use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tauri::Manager;
-use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufReader};
+use tokio::process::Command;
 use tokio::sync::Mutex;
 
 use crate::text_file::{decode_lossy_text_file, ensure_supported_text_path};
@@ -54,6 +56,8 @@ impl SshState {
 }
 
 static NEXT_CONNECTION_ID: AtomicU64 = AtomicU64::new(1);
+const OPENSSH_SETUP_SCRIPT: &str = include_str!("../../../scripts/configure-windows-ssh-server.ps1");
+const WINRM_OPEN_SSH_SETUP_OUTPUT_EVENT: &str = "winrm-open-ssh-setup-output";
 
 /// 文件变化事件载荷（通过 Tauri 事件总线推送到前端）。
 #[derive(Clone, Serialize)]
@@ -63,6 +67,18 @@ pub struct FileChangedPayload {
     pub path: String,
     pub kind: String,
     pub content: String,
+}
+
+/// WinRM 执行 OpenSSH 配置脚本时推送到前端的终端输出事件。
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WinRmOpenSshSetupOutputPayload {
+    pub run_id: String,
+    pub stream: String,
+    pub line: String,
+    pub done: bool,
+    pub exit_code: Option<i32>,
+    pub error: Option<String>,
 }
 
 // ── 前端可见数据类型 ──────────────────────────────────────────────────────
@@ -102,6 +118,49 @@ pub struct SshConnectRequest {
     pub parent_connection_id: Option<String>,
     pub parent_profile_id: Option<String>,
     pub vm_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RdpOpenRequest {
+    pub host: String,
+    pub port: Option<u16>,
+    pub username: Option<String>,
+    pub password: Option<String>,
+}
+
+#[derive(Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct WinRmOpenSshSetupRequest {
+    pub run_id: String,
+    pub host: String,
+    pub winrm_port: Option<u16>,
+    pub username: String,
+    pub password: String,
+    pub ssh_port: Option<u16>,
+    pub firewall_profile: Option<String>,
+    pub set_network_private: Option<bool>,
+    pub enable_password_authentication: Option<bool>,
+}
+
+#[derive(Clone)]
+struct NormalizedWinRmOpenSshSetupRequest {
+    run_id: String,
+    host: String,
+    winrm_port: u16,
+    username: String,
+    password: String,
+    ssh_port: u16,
+    firewall_profile: String,
+    set_network_private: bool,
+    enable_password_authentication: bool,
+}
+
+struct RdpTarget {
+    host: String,
+    address: String,
+    username: Option<String>,
+    password: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -147,6 +206,334 @@ fn connection_label(label: Option<String>, host: &str, port: u16, username: &str
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| format!("{}@{}:{}", username.trim(), host.trim(), port))
+}
+
+fn rdp_target(request: RdpOpenRequest) -> Result<RdpTarget, String> {
+    let host = request.host.trim();
+    if host.is_empty() {
+        return Err("RDP 主机不能为空".to_string());
+    }
+    if host
+        .chars()
+        .any(|ch| ch.is_control() || ch.is_whitespace() || ch == '"' || ch == '\'')
+    {
+        return Err("RDP 主机名包含不支持的字符".to_string());
+    }
+
+    let port = request.port.unwrap_or(3389);
+    if port == 0 {
+        return Err("RDP 端口必须在 1-65535 之间".to_string());
+    }
+
+    let username = request
+        .username
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let password = request.password.filter(|value| !value.is_empty());
+
+    Ok(RdpTarget {
+        host: host.to_string(),
+        address: format!("{}:{}", host, port),
+        username,
+        password,
+    })
+}
+
+fn normalize_winrm_open_ssh_setup_request(
+    request: WinRmOpenSshSetupRequest,
+) -> Result<NormalizedWinRmOpenSshSetupRequest, String> {
+    let run_id = request.run_id.trim().to_string();
+    if run_id.is_empty() {
+        return Err("WinRM run id 不能为空".to_string());
+    }
+
+    let host = request.host.trim().to_string();
+    if host.is_empty() {
+        return Err("WinRM 主机不能为空".to_string());
+    }
+    if host
+        .chars()
+        .any(|ch| ch.is_control() || ch.is_whitespace() || ch == '"' || ch == '\'')
+    {
+        return Err("WinRM 主机名包含不支持的字符".to_string());
+    }
+
+    let username = request.username.trim().to_string();
+    if username.is_empty() {
+        return Err("WinRM 用户名不能为空".to_string());
+    }
+
+    let firewall_profile = request
+        .firewall_profile
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "Any".to_string());
+    if !matches!(
+        firewall_profile.as_str(),
+        "Any" | "Domain" | "Private" | "Public"
+    ) {
+        return Err("防火墙配置文件必须是 Any、Domain、Private 或 Public".to_string());
+    }
+
+    Ok(NormalizedWinRmOpenSshSetupRequest {
+        run_id,
+        host,
+        winrm_port: request.winrm_port.unwrap_or(5985),
+        username,
+        password: request.password,
+        ssh_port: request.ssh_port.unwrap_or(22),
+        firewall_profile,
+        set_network_private: request.set_network_private.unwrap_or(true),
+        enable_password_authentication: request.enable_password_authentication.unwrap_or(true),
+    })
+}
+
+fn ps_single_quoted(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+fn ps_bool(value: bool) -> &'static str {
+    if value {
+        "$true"
+    } else {
+        "$false"
+    }
+}
+
+fn build_winrm_open_ssh_setup_script(request: &NormalizedWinRmOpenSshSetupRequest) -> String {
+    format!(
+        r#"$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+$InformationPreference = 'Continue'
+
+function Write-SetupLine {{
+    param([string]$Message)
+    [Console]::Out.WriteLine($Message)
+}}
+
+$targetHost = {host}
+$winRmPort = {winrm_port}
+$username = {username}
+$passwordPlain = {password}
+$securePassword = ConvertTo-SecureString $passwordPlain -AsPlainText -Force
+$credential = [pscredential]::new($username, $securePassword)
+$scriptContent = @'
+{script_content}
+'@
+$sshPort = {ssh_port}
+$firewallProfile = {firewall_profile}
+$setNetworkPrivate = {set_network_private}
+$enablePasswordAuthentication = {enable_password_authentication}
+$session = $null
+
+try {{
+    Write-SetupLine ("[winrm] Connecting to {{0}}:{{1}} ..." -f $targetHost, $winRmPort)
+    $sessionOptions = New-PSSessionOption -OperationTimeout 180000
+    $session = New-PSSession -ComputerName $targetHost -Port $winRmPort -Credential $credential -SessionOption $sessionOptions -ErrorAction Stop
+
+    Write-SetupLine '[winrm] Connected. Uploading and running OpenSSH setup script...'
+    Invoke-Command -Session $session -ScriptBlock {{
+        param(
+            [string]$Content,
+            [int]$SshPort,
+            [string]$FirewallProfile,
+            [bool]$SetNetworkPrivate,
+            [bool]$EnablePasswordAuthentication
+        )
+
+        $ErrorActionPreference = 'Stop'
+        $remoteScript = Join-Path $env:TEMP 'configure-windows-ssh-server.ps1'
+        Set-Content -LiteralPath $remoteScript -Value $Content -Encoding ASCII
+
+        $arguments = @(
+            '-NoProfile',
+            '-ExecutionPolicy',
+            'Bypass',
+            '-File',
+            $remoteScript,
+            '-Port',
+            [string]$SshPort,
+            '-FirewallProfile',
+            $FirewallProfile
+        )
+        if ($SetNetworkPrivate) {{ $arguments += '-SetNetworkPrivate' }}
+        if ($EnablePasswordAuthentication) {{ $arguments += '-EnablePasswordAuthentication' }}
+
+        & powershell.exe @arguments 2>&1 | ForEach-Object {{ [string]$_ }}
+        $exitCode = if ($null -ne $LASTEXITCODE) {{ $LASTEXITCODE }} else {{ 0 }}
+        if ($exitCode -ne 0) {{
+            throw "OpenSSH setup script exited with code $exitCode"
+        }}
+    }} -ArgumentList $scriptContent, $sshPort, $firewallProfile, $setNetworkPrivate, $enablePasswordAuthentication -ErrorAction Stop |
+        ForEach-Object {{ Write-SetupLine ([string]$_) }}
+
+    Write-SetupLine '[winrm] OpenSSH setup completed.'
+    exit 0
+}}
+catch {{
+    Write-SetupLine ("[winrm] ERROR: " + ($_ | Out-String).Trim())
+    exit 1
+}}
+finally {{
+    if ($null -ne $session) {{
+        Remove-PSSession -Session $session -ErrorAction SilentlyContinue
+    }}
+}}
+"#,
+        host = ps_single_quoted(&request.host),
+        winrm_port = request.winrm_port,
+        username = ps_single_quoted(&request.username),
+        password = ps_single_quoted(&request.password),
+        script_content = OPENSSH_SETUP_SCRIPT.trim_end(),
+        ssh_port = request.ssh_port,
+        firewall_profile = ps_single_quoted(&request.firewall_profile),
+        set_network_private = ps_bool(request.set_network_private),
+        enable_password_authentication = ps_bool(request.enable_password_authentication),
+    )
+}
+
+fn emit_winrm_open_ssh_setup_output(
+    app_handle: &tauri::AppHandle,
+    run_id: &str,
+    stream: &str,
+    line: impl Into<String>,
+    done: bool,
+    exit_code: Option<i32>,
+    error: Option<String>,
+) {
+    let _ = app_handle.emit_all(
+        WINRM_OPEN_SSH_SETUP_OUTPUT_EVENT,
+        WinRmOpenSshSetupOutputPayload {
+            run_id: run_id.to_string(),
+            stream: stream.to_string(),
+            line: line.into(),
+            done,
+            exit_code,
+            error,
+        },
+    );
+}
+
+async fn run_winrm_open_ssh_setup_task(
+    app_handle: tauri::AppHandle,
+    request: NormalizedWinRmOpenSshSetupRequest,
+) {
+    let run_id = request.run_id.clone();
+    let script = build_winrm_open_ssh_setup_script(&request);
+    emit_winrm_open_ssh_setup_output(
+        &app_handle,
+        &run_id,
+        "status",
+        format!(
+            "[local] Starting WinRM OpenSSH setup for {}:{}",
+            request.host, request.winrm_port
+        ),
+        false,
+        None,
+        None,
+    );
+
+    let mut child = match Command::new("powershell.exe")
+        .arg("-NoProfile")
+        .arg("-NonInteractive")
+        .arg("-ExecutionPolicy")
+        .arg("Bypass")
+        .arg("-Command")
+        .arg("-")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(err) => {
+            emit_winrm_open_ssh_setup_output(
+                &app_handle,
+                &run_id,
+                "error",
+                "",
+                true,
+                None,
+                Some(format!("启动 PowerShell 失败: {}", err)),
+            );
+            return;
+        }
+    };
+
+    if let Some(mut stdin) = child.stdin.take() {
+        if let Err(err) = stdin.write_all(script.as_bytes()).await {
+            emit_winrm_open_ssh_setup_output(
+                &app_handle,
+                &run_id,
+                "error",
+                "",
+                true,
+                None,
+                Some(format!("写入 PowerShell 脚本失败: {}", err)),
+            );
+            return;
+        }
+    }
+
+    let stdout_task = child.stdout.take().map(|stdout| {
+        let app_handle = app_handle.clone();
+        let run_id = run_id.clone();
+        tokio::spawn(async move {
+            let mut lines = BufReader::new(stdout).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                emit_winrm_open_ssh_setup_output(&app_handle, &run_id, "stdout", line, false, None, None);
+            }
+        })
+    });
+
+    let stderr_task = child.stderr.take().map(|stderr| {
+        let app_handle = app_handle.clone();
+        let run_id = run_id.clone();
+        tokio::spawn(async move {
+            let mut lines = BufReader::new(stderr).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                emit_winrm_open_ssh_setup_output(&app_handle, &run_id, "stderr", line, false, None, None);
+            }
+        })
+    });
+
+    let status = child.wait().await;
+    if let Some(task) = stdout_task {
+        let _ = task.await;
+    }
+    if let Some(task) = stderr_task {
+        let _ = task.await;
+    }
+
+    match status {
+        Ok(status) if status.success() => emit_winrm_open_ssh_setup_output(
+            &app_handle,
+            &run_id,
+            "status",
+            "[local] WinRM OpenSSH setup finished successfully.",
+            true,
+            status.code(),
+            None,
+        ),
+        Ok(status) => emit_winrm_open_ssh_setup_output(
+            &app_handle,
+            &run_id,
+            "error",
+            "[local] WinRM OpenSSH setup failed.",
+            true,
+            status.code(),
+            Some(format!("PowerShell exited with code {:?}", status.code())),
+        ),
+        Err(err) => emit_winrm_open_ssh_setup_output(
+            &app_handle,
+            &run_id,
+            "error",
+            "",
+            true,
+            None,
+            Some(format!("等待 PowerShell 执行结果失败: {}", err)),
+        ),
+    }
 }
 
 async fn connection_handle(
@@ -195,6 +582,69 @@ async fn open_sftp(handle: &Handle<SshHandler>) -> Result<SftpSession, String> {
 }
 
 // ── Tauri 命令 ────────────────────────────────────────────────────────────
+
+/// 通过本机 PowerShell/WinRM 在目标 Windows 机器上执行 OpenSSH 配置脚本。
+#[tauri::command]
+pub async fn winrm_run_open_ssh_setup(
+    app_handle: tauri::AppHandle,
+    request: WinRmOpenSshSetupRequest,
+) -> Result<(), String> {
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (app_handle, request);
+        Err("当前平台不支持通过 WinRM 执行 Windows SSH 配置脚本。".to_string())
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let request = normalize_winrm_open_ssh_setup_request(request)?;
+        tokio::spawn(async move {
+            run_winrm_open_ssh_setup_task(app_handle, request).await;
+        });
+        Ok(())
+    }
+}
+
+/// 打开本机 Windows Remote Desktop 客户端，用于在 SSH 启用前进入目标机器。
+#[tauri::command]
+pub fn rdp_open(request: RdpOpenRequest) -> Result<(), String> {
+    let target = rdp_target(request)?;
+
+    #[cfg(target_os = "windows")]
+    {
+        if let (Some(username), Some(password)) = (&target.username, &target.password) {
+            let credential_targets = if target.address == target.host {
+                vec![target.host.clone()]
+            } else {
+                vec![target.host.clone(), target.address.clone()]
+            };
+
+            for credential_target in credential_targets {
+                std::process::Command::new("cmdkey.exe")
+                    .arg(format!("/generic:TERMSRV/{}", credential_target))
+                    .arg(format!("/user:{}", username))
+                    .arg(format!("/pass:{}", password))
+                    .status()
+                    .map_err(|e| format!("写入 RDP 凭据失败: {}", e))?
+                    .success()
+                    .then_some(())
+                    .ok_or_else(|| "写入 RDP 凭据失败。".to_string())?;
+            }
+        }
+
+        std::process::Command::new("mstsc.exe")
+            .arg(format!("/v:{}", target.address))
+            .spawn()
+            .map_err(|e| format!("打开远程桌面失败: {}", e))?;
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = target;
+        Err("当前平台不支持自动打开 Windows 远程桌面。".to_string())
+    }
+}
 
 /// 建立 SSH 连接并完成密码认证。
 #[tauri::command]

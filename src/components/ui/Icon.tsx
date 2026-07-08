@@ -69,6 +69,20 @@ const PATHS: Record<string, React.ReactNode> = {
 			<line x1="6" y1="18" x2="6.01" y2="18" />
 		</>
 	),
+	monitor: (
+		<>
+			<rect x="3" y="4" width="18" height="12" rx="2" />
+			<path d="M8 20h8" />
+			<path d="M12 16v4" />
+		</>
+	),
+	download: (
+		<>
+			<path d="M12 3v12" />
+			<path d="m7 10 5 5 5-5" />
+			<path d="M5 21h14" />
+		</>
+	),
 	plug: (
 		<>
 			<path d="M12 22v-5" />
