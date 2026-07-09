@@ -83,6 +83,19 @@ const PATHS: Record<string, React.ReactNode> = {
 			<path d="M5 21h14" />
 		</>
 	),
+	upload: (
+		<>
+			<path d="M12 21V9" />
+			<path d="m7 14 5-5 5 5" />
+			<path d="M5 3h14" />
+		</>
+	),
+	plus: (
+		<>
+			<path d="M12 5v14" />
+			<path d="M5 12h14" />
+		</>
+	),
 	plug: (
 		<>
 			<path d="M12 22v-5" />
@@ -147,6 +160,12 @@ const PATHS: Record<string, React.ReactNode> = {
 	check: (
 		<>
 			<path d="m20 6-11 11-5-5" />
+		</>
+	),
+	x: (
+		<>
+			<path d="M18 6 6 18" />
+			<path d="m6 6 12 12" />
 		</>
 	),
 };

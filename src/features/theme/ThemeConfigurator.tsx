@@ -11,6 +11,7 @@ import {
 	useTheme,
 } from '@/features/theme/ThemeContext';
 import { GALAXY_STYLE_OPTIONS } from '@/components/galaxyPresets';
+import { Icon } from '@/components/ui/Icon';
 import { Switch } from '@/components/ui/Switch';
 
 interface SliderProps {
@@ -179,7 +180,7 @@ export function ThemeConfigurator({ open, onClose }: { open: boolean; onClose: (
 		const url = URL.createObjectURL(blob);
 		const a = document.createElement('a');
 		a.href = url;
-		a.download = 'vector-vision-theme.json';
+		a.download = 'mytoolbox-theme.json';
 		a.click();
 		URL.revokeObjectURL(url);
 	}
@@ -253,11 +254,10 @@ export function ThemeConfigurator({ open, onClose }: { open: boolean; onClose: (
 							animate={{ opacity: 1, y: 0, scale: 1 }}
 							exit={{ opacity: 0, y: -8, scale: 0.97 }}
 							transition={{ type: 'spring', stiffness: 280, damping: 26 }}
-							className="dark-popover fixed top-10 right-4 z-40 flex max-h-[calc(100vh-56px)] w-[min(90vw,300px)] flex-col rounded-2xl
-                border border-white/15 bg-neutral-900/95 shadow-2xl shadow-black/50 backdrop-blur-xl"
+							className="glass app-popover fixed top-10 right-4 z-40 flex max-h-[calc(100vh-56px)] w-[min(90vw,300px)] flex-col overflow-hidden rounded-2xl shadow-2xl"
 						>
 							{/* 置顶标题行 */}
-							<div className="sticky top-0 z-10 flex shrink-0 items-center justify-between rounded-t-2xl border-b border-white/[0.07] bg-neutral-900/95 px-5 py-3.5 backdrop-blur-xl">
+							<div className="sticky top-0 z-10 flex shrink-0 items-center justify-between border-b border-white/[0.07] bg-white/[0.04] px-5 py-3.5 backdrop-blur-xl">
 								<h3 className="text-sm font-semibold card-title">外观配置</h3>
 								<div className="flex items-center gap-2">
 									<button
@@ -266,25 +266,18 @@ export function ThemeConfigurator({ open, onClose }: { open: boolean; onClose: (
 											reset();
 											setBgImageError('');
 										}}
-										className="rounded-lg border border-white/15 px-2 py-1 text-[11px] text-white/60 transition-colors hover:bg-white/10 hover:text-white"
+										className="glass glass-button glass-control rounded-lg px-2 py-1 text-[11px]"
 									>
 										重置
 									</button>
 									<button
 										type="button"
 										onClick={onClose}
-										className="flex h-5 w-5 items-center justify-center rounded-full bg-white/[0.07] text-white/50 transition-colors hover:bg-white/15 hover:text-white"
+										className="glass glass-icon-button glass-control h-6 w-6 rounded-full"
+										aria-label="关闭"
+										title="关闭"
 									>
-										<svg
-											viewBox="0 0 12 12"
-											className="h-2.5 w-2.5"
-											stroke="currentColor"
-											strokeWidth="1.5"
-											strokeLinecap="round"
-										>
-											<line x1="2" y1="2" x2="10" y2="10" />
-											<line x1="10" y1="2" x2="2" y2="10" />
-										</svg>
+										<Icon name="x" className="h-3.5 w-3.5" aria-hidden="true" />
 									</button>
 								</div>
 							</div>

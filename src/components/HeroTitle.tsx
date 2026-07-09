@@ -26,7 +26,7 @@ export function HeroTitle() {
         }}
         className="select-none bg-gradient-to-b from-white to-white/70 bg-clip-text text-5xl font-semibold tracking-tight text-transparent sm:text-6xl"
       >
-        Vector Vision
+        MyToolBox
       </motion.h1>
 
       <motion.p

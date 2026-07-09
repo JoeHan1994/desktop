@@ -4,12 +4,11 @@ pub const UNSUPPORTED_TEXT_FILE_MESSAGE: &str =
     "无法打开：仅支持文本文件，当前文件可能是可执行文件或二进制文件";
 
 const BLOCKED_EXTENSIONS: &[&str] = &[
-    "exe", "dll", "msi", "sys", "com", "scr", "bin", "dat", "so", "dylib", "lib", "a",
-    "obj", "o", "class", "jar", "war", "ear", "zip", "rar", "7z", "gz", "tgz", "bz2",
-    "xz", "png", "jpg", "jpeg", "gif", "webp", "ico", "bmp", "tif", "tiff", "mp4",
-    "mkv", "avi", "mov", "wmv", "mp3", "wav", "flac", "aac", "ogg", "pdf", "doc",
-    "docx", "xls", "xlsx", "ppt", "pptx", "db", "sqlite", "sqlite3", "mdb", "accdb",
-    "ttf", "otf", "woff", "woff2",
+    "exe", "dll", "msi", "sys", "com", "scr", "bin", "dat", "so", "dylib", "lib", "a", "obj", "o",
+    "class", "jar", "war", "ear", "zip", "rar", "7z", "gz", "tgz", "bz2", "xz", "png", "jpg",
+    "jpeg", "gif", "webp", "ico", "bmp", "tif", "tiff", "mp4", "mkv", "avi", "mov", "wmv", "mp3",
+    "wav", "flac", "aac", "ogg", "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "db",
+    "sqlite", "sqlite3", "mdb", "accdb", "ttf", "otf", "woff", "woff2",
 ];
 
 pub fn ensure_supported_text_path(path: &str) -> Result<(), String> {
@@ -37,7 +36,8 @@ pub fn decode_lossy_text_file(path: &str, bytes: Vec<u8>) -> Result<String, Stri
 pub fn decode_utf8_text_file(path: &Path, bytes: Vec<u8>) -> Result<String, String> {
     let path_str = path.to_string_lossy();
     ensure_text_bytes(&path_str, &bytes)?;
-    String::from_utf8(bytes).map_err(|_| "无法打开：仅支持 UTF-8 文本文件，当前文件编码不受支持".to_string())
+    String::from_utf8(bytes)
+        .map_err(|_| "无法打开：仅支持 UTF-8 文本文件，当前文件编码不受支持".to_string())
 }
 
 fn looks_binary(bytes: &[u8]) -> bool {

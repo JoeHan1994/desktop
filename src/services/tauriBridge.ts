@@ -88,7 +88,7 @@ export interface PipelineStats {
 	particle_count: number;
 }
 
-/** 远程机器连接配置（保存在本地 app_settings）。 */
+/** 远程机器连接配置（保存在 MySQL）。 */
 export interface RemoteMachineProfile {
 	id: string;
 	label: string;
@@ -97,6 +97,20 @@ export interface RemoteMachineProfile {
 	rdpPort?: string;
 	username: string;
 	password: string;
+	lastConnectedAt: string;
+}
+
+/** Hyper-V VM 连接凭据（保存在 MySQL）。 */
+export interface HyperVVmCredentialProfile {
+	id: string;
+	label: string;
+	host: string;
+	port: string;
+	username: string;
+	password: string;
+	parentProfileId: string;
+	vmId: string;
+	vmName: string;
 	lastConnectedAt: string;
 }
 
@@ -215,6 +229,64 @@ export async function getVectorPoints(): Promise<VectorPoint[]> {
 }
 
 // ── Remote Machine SSH ───────────────────────────────────────────────────
+
+/** 从 MySQL 加载远程机器配置列表。 */
+export async function listRemoteMachineProfiles(): Promise<RemoteMachineProfile[]> {
+	return invoke<RemoteMachineProfile[]>('list_remote_machine_profiles');
+}
+
+/** 将旧版本地 SQLite 远程机器配置导入 MySQL，仅首次导入。 */
+export async function importLegacyRemoteMachineProfiles(): Promise<RemoteMachineProfile[]> {
+	return invoke<RemoteMachineProfile[]>('import_legacy_remote_machine_profiles');
+}
+
+/** 新增或更新远程机器配置，并返回最新 MySQL 列表。 */
+export async function upsertRemoteMachineProfile(
+	profile: RemoteMachineProfile,
+	previousProfileId?: string | null,
+): Promise<RemoteMachineProfile[]> {
+	return invoke<RemoteMachineProfile[]>('upsert_remote_machine_profile', {
+		request: { profile, previousProfileId },
+	});
+}
+
+/** 删除远程机器配置，并返回最新 MySQL 列表。 */
+export async function deleteRemoteMachineProfile(id: string): Promise<RemoteMachineProfile[]> {
+	return invoke<RemoteMachineProfile[]>('delete_remote_machine_profile', { id });
+}
+
+/** 从 MySQL 加载 Hyper-V VM 凭据列表。 */
+export async function listHyperVVmCredentialProfiles(): Promise<HyperVVmCredentialProfile[]> {
+	return invoke<HyperVVmCredentialProfile[]>('list_hyperv_vm_credentials');
+}
+
+/** 将旧版本地 SQLite Hyper-V VM 凭据导入 MySQL，仅首次导入。 */
+export async function importLegacyHyperVVmCredentialProfiles(): Promise<HyperVVmCredentialProfile[]> {
+	return invoke<HyperVVmCredentialProfile[]>('import_legacy_hyperv_vm_credentials');
+}
+
+/** 新增或更新 Hyper-V VM 凭据，并返回最新 MySQL 列表。 */
+export async function upsertHyperVVmCredentialProfile(
+	credential: HyperVVmCredentialProfile,
+): Promise<HyperVVmCredentialProfile[]> {
+	return invoke<HyperVVmCredentialProfile[]>('upsert_hyperv_vm_credential', {
+		request: { credential },
+	});
+}
+
+/** 删除 Hyper-V VM 凭据，并返回最新 MySQL 列表。 */
+export async function deleteHyperVVmCredentialProfile(id: string): Promise<HyperVVmCredentialProfile[]> {
+	return invoke<HyperVVmCredentialProfile[]>('delete_hyperv_vm_credential', { id });
+}
+
+/** 删除指定宿主机配置下的 Hyper-V VM 凭据，并返回最新 MySQL 列表。 */
+export async function deleteHyperVVmCredentialsByParentProfileId(
+	parentProfileId: string,
+): Promise<HyperVVmCredentialProfile[]> {
+	return invoke<HyperVVmCredentialProfile[]>('delete_hyperv_vm_credentials_by_parent_profile_id', {
+		parentProfileId,
+	});
+}
 
 /** 打开本机 Windows Remote Desktop 客户端。 */
 export async function rdpOpen(params: RdpOpenParams): Promise<void> {
@@ -373,9 +445,14 @@ export interface ModelProviderPayload {
 	apiKey: string;
 }
 
-/** 从磁盘加载所有已保存的 Model Provider。 */
+/** 从 MySQL 加载所有已保存的 Model Provider。 */
 export async function getProviders(): Promise<ModelProviderPayload[]> {
 	return invoke<ModelProviderPayload[]>('get_providers');
+}
+
+/** 将旧版 SQLite Model Provider 导入 MySQL，仅首次导入。 */
+export async function importLegacyModelProviders(): Promise<ModelProviderPayload[]> {
+	return invoke<ModelProviderPayload[]>('import_legacy_model_providers');
 }
 
 /**

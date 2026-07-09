@@ -6,8 +6,8 @@ import { ModelProvidersProvider } from '@/features/models/ModelProvidersContext'
 import { ErrorBoundary } from '@/components/ErrorBoundary';
 
 export const metadata: Metadata = {
-	title: 'Vector Vision',
-	description: '3D 液态玻璃向量数据库可视化',
+  title: 'MyToolBox',
+  description: 'MyToolBox desktop workspace',
 };
 
 const criticalFallbackCss = String.raw`
@@ -17,8 +17,8 @@ body[data-vv-asset-failed="true"]:before{content:"资源加载异常，正在等
 
 const assetRecoveryScript = `
 (function(){
-  var KEY='vector-vision.asset-recover-at';
-  var FAIL='vector-vision.asset-recover-failed';
+  var KEY='mytoolbox.asset-recover-at';
+  var FAIL='mytoolbox.asset-recover-failed';
   var RECOVER_PARAM='__vv_recover';
   function isAssetUrl(value){return typeof value==='string'&&value.indexOf('/_next/static/')!==-1;}
   function isRecoverableMessage(value){return /ChunkLoadError|Loading chunk|Cannot find module|MODULE_NOT_FOUND|webpack-runtime|_next\\/static/i.test(String(value||''));}

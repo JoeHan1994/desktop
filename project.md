@@ -106,7 +106,7 @@
 
 # 项目目录结构设计
 ```
-my-tauri-vector-app/
+mytoolbox/
 ├── .vscode/                   # VS Code 项目级配置（如之前配置的 rust-analyzer 规则）
 ├── public/                    # 静态资源（全公开，不会被 Webpack 编译）
 │   ├── icons/                 # 系统图标

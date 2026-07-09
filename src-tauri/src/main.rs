@@ -4,12 +4,14 @@
 mod commands;
 mod db;
 mod embed;
+mod mysql_profiles;
 mod store;
 mod text_file;
 
-use commands::{pipeline, settings, vector_db, remote};
-use remote::SshState;
+use commands::{pipeline, remote, remote_profiles, settings, vector_db};
 use db::DbState;
+use mysql_profiles::MySqlProfileState;
+use remote::SshState;
 use store::AppState;
 use tauri::Manager;
 
@@ -52,6 +54,10 @@ fn main() {
             app.manage(db);
             app.manage(SshState::new());
 
+            let config_dir = tauri::api::path::app_config_dir(&app.config())
+                .ok_or("failed to resolve app config dir")?;
+            app.manage(MySqlProfileState::load(&config_dir));
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -62,8 +68,18 @@ fn main() {
             settings::get_providers,
             settings::upsert_provider,
             settings::delete_provider,
+            settings::import_legacy_model_providers,
             settings::get_setting,
             settings::set_setting,
+            remote_profiles::list_remote_machine_profiles,
+            remote_profiles::upsert_remote_machine_profile,
+            remote_profiles::delete_remote_machine_profile,
+            remote_profiles::import_legacy_remote_machine_profiles,
+            remote_profiles::list_hyperv_vm_credentials,
+            remote_profiles::upsert_hyperv_vm_credential,
+            remote_profiles::delete_hyperv_vm_credential,
+            remote_profiles::delete_hyperv_vm_credentials_by_parent_profile_id,
+            remote_profiles::import_legacy_hyperv_vm_credentials,
             remote::winrm_run_open_ssh_setup,
             remote::rdp_open,
             remote::ssh_connect,

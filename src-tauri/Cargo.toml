@@ -1,7 +1,7 @@
 [package]
-name = "my-tauri-vector-app"
+name = "mytoolbox"
 version = "0.1.0"
-description = "3D 液态玻璃向量数据库可视化应用"
+description = "MyToolBox desktop application"
 authors = ["you"]
 edition = "2021"
 
@@ -14,6 +14,12 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tokio = { version = "1", features = ["full"] }
 rusqlite = { version = "0.31", features = ["bundled"] }
+chrono = "0.4"
+mysql = "25"
+aes-gcm = "0.10"
+base64 = "0.22"
+rand = "0.8"
+toml = "0.8"
 russh         = "0.44"
 russh-keys    = "0.44"
 russh-sftp    = "2.0"

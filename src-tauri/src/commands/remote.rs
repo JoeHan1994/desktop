@@ -56,7 +56,8 @@ impl SshState {
 }
 
 static NEXT_CONNECTION_ID: AtomicU64 = AtomicU64::new(1);
-const OPENSSH_SETUP_SCRIPT: &str = include_str!("../../../scripts/configure-windows-ssh-server.ps1");
+const OPENSSH_SETUP_SCRIPT: &str =
+    include_str!("../../../scripts/configure-windows-ssh-server.ps1");
 const WINRM_OPEN_SSH_SETUP_OUTPUT_EVENT: &str = "winrm-open-ssh-setup-output";
 
 /// 文件变化事件载荷（通过 Tauri 事件总线推送到前端）。
@@ -481,7 +482,15 @@ async fn run_winrm_open_ssh_setup_task(
         tokio::spawn(async move {
             let mut lines = BufReader::new(stdout).lines();
             while let Ok(Some(line)) = lines.next_line().await {
-                emit_winrm_open_ssh_setup_output(&app_handle, &run_id, "stdout", line, false, None, None);
+                emit_winrm_open_ssh_setup_output(
+                    &app_handle,
+                    &run_id,
+                    "stdout",
+                    line,
+                    false,
+                    None,
+                    None,
+                );
             }
         })
     });
@@ -492,7 +501,15 @@ async fn run_winrm_open_ssh_setup_task(
         tokio::spawn(async move {
             let mut lines = BufReader::new(stderr).lines();
             while let Ok(Some(line)) = lines.next_line().await {
-                emit_winrm_open_ssh_setup_output(&app_handle, &run_id, "stderr", line, false, None, None);
+                emit_winrm_open_ssh_setup_output(
+                    &app_handle,
+                    &run_id,
+                    "stderr",
+                    line,
+                    false,
+                    None,
+                    None,
+                );
             }
         })
     });
@@ -656,18 +673,15 @@ pub async fn ssh_connect(
     let config = Arc::new(Config::default());
     let host_value = request.host.trim().to_string();
     let username_value = request.username.trim().to_string();
-    let kind_value = request.kind
+    let kind_value = request
+        .kind
         .map(|value| value.trim().to_lowercase())
         .filter(|value| value == "host" || value == "vm")
         .unwrap_or_else(|| "host".to_string());
 
-    let mut handle = client::connect(
-        config,
-        (host_value.clone(), port),
-        SshHandler,
-    )
-    .await
-    .map_err(|e| format!("SSH 连接失败 ({}:{}): {}", host_value, port, e))?;
+    let mut handle = client::connect(config, (host_value.clone(), port), SshHandler)
+        .await
+        .map_err(|e| format!("SSH 连接失败 ({}:{}): {}", host_value, port, e))?;
 
     let authenticated = handle
         .authenticate_password(&username_value, request.password)
@@ -727,12 +741,9 @@ pub async fn ssh_get_disks(
 ) -> Result<Vec<String>, String> {
     let handle = connection_handle(&state, &connection_id).await?;
 
-    let raw = exec_cmd(
-        &handle,
-        "wmic logicaldisk get name /value 2>nul",
-    )
-    .await
-    .unwrap_or_default();
+    let raw = exec_cmd(&handle, "wmic logicaldisk get name /value 2>nul")
+        .await
+        .unwrap_or_default();
 
     let disks: Vec<String> = raw
         .lines()
@@ -878,8 +889,8 @@ pub async fn ssh_list_hyperv_vms(
         return Ok(Vec::new());
     }
 
-    let value: Value = serde_json::from_str(trimmed)
-        .map_err(|e| format!("解析 Hyper-V VM 列表失败: {}", e))?;
+    let value: Value =
+        serde_json::from_str(trimmed).map_err(|e| format!("解析 Hyper-V VM 列表失败: {}", e))?;
 
     let items = match value {
         Value::Array(items) => items,
@@ -1083,7 +1094,14 @@ pub async fn ssh_watch_file(
     let path_clone = path.clone();
 
     tokio::spawn(async move {
-        watch_file_task(handle, connection_id_clone, path_clone, app_handle, cancel_rx).await;
+        watch_file_task(
+            handle,
+            connection_id_clone,
+            path_clone,
+            app_handle,
+            cancel_rx,
+        )
+        .await;
     });
 
     conn.watchers.insert(path, cancel_tx);
@@ -1102,4 +1120,3 @@ pub async fn ssh_unwatch_file(
     conn.watchers.remove(&path);
     Ok(())
 }
-

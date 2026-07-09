@@ -1,4 +1,4 @@
-# Vector Vision
+# MyToolBox
 
 > 本地私有化向量数据库全流程可视化桌面应用，基于 Next.js + Tauri + Rust 构建，采用 3D 液态玻璃（Liquid Glass）视觉特效系统。
 
@@ -137,11 +137,47 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
 
 脚本完成后回到应用点击 SSH 连接，即可继续使用远程文件浏览、日志查看和 Hyper-V VM 操作。RDP 本身需要目标机器已允许远程桌面并且网络可达；该入口不会远程开启 RDP 服务。
 
+### 远程机器列表 MySQL 持久化
+
+个性化设置、外观配置和 Hyper-V VM 凭据仍保存在本机 SQLite；远程机器主机列表保存在内网 MySQL。默认连接目标为：
+
+- Host：`192.168.51.66`
+- Port：`3306`
+- Database：`mytoolbox`
+
+首次启动应用会在系统应用配置目录创建 `mysql.toml` 模板。Windows 下通常位于：
+
+```text
+%APPDATA%\com.mytoolbox.app\mysql.toml
+```
+
+打开该文件后，手动补充 MySQL 密码，并把 `encryption_key_base64` 替换成 32 字节 Base64 密钥。可以用 PowerShell 生成：
+
+```powershell
+[Convert]::ToBase64String([System.Security.Cryptography.RandomNumberGenerator]::GetBytes(32))
+```
+
+配置示例：
+
+```toml
+host = "192.168.51.66"
+port = 3306
+database = "mytoolbox"
+username = "root"
+password = "你的 MySQL 密码"
+encryption_key_base64 = "上面 PowerShell 生成的值"
+connect_timeout_seconds = 5
+```
+
+远程机器 SSH 密码会使用 `encryption_key_base64` 在本机加密后写入 MySQL，不会以明文保存。多台客户端共享同一个远程机器列表时，需要使用同一个加密密钥，否则其他客户端无法解密已保存的 SSH 密码。
+
+建表 SQL 位于 `scripts/mysql-remote-machine-profiles.sql`。应用启动后也会自动执行 `CREATE TABLE IF NOT EXISTS remote_machine_profiles`，但生产环境建议先用 SQL 脚本初始化，并为应用创建低权限账号，不要长期使用 MySQL `root`。
+
 ---
 
 ## 向量管道流程
 
-```
+```text
 数据准备 (Ingestion)
   └─ 多源文档导入 → 文本清洗 → 智能重叠分块 (Chunking)
         ↓

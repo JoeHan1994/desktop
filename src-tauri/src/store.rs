@@ -3,8 +3,8 @@
 //! `AppState` 通过 `Arc<Mutex<>>` 在主线程与后台 `spawn_blocking` 线程之间
 //! 安全共享，由 Tauri 的 `.manage()` 注入到所有 command 中。
 
-use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
+use std::sync::{Arc, Mutex};
 
 // ── Settings: Model Provider ─────────────────────────────────────────────
 
@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 pub struct ModelProvider {
     pub id: String,
     pub name: String,
-    pub provider: String,       // "ollama" | "openai"
+    pub provider: String, // "ollama" | "openai"
     pub api_base_url: String,
     pub model: String,
     pub api_key: String,

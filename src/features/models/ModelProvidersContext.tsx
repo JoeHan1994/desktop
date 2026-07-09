@@ -10,6 +10,7 @@ import {
 } from 'react';
 import {
   getProviders,
+  importLegacyModelProviders,
   upsertProvider,
   deleteProvider,
   type ModelProviderPayload,
@@ -69,7 +70,8 @@ export function ModelProvidersProvider({ children }: { children: ReactNode }) {
   // 应用启动时从后端加载已持久化的 providers
   useEffect(() => {
     if (!isTauri()) return;
-    getProviders()
+    importLegacyModelProviders()
+      .catch(() => getProviders())
       .then((list) => setProviders(list.map(fromPayload)))
       .catch(() => {}); // 非 Tauri 环境或读取失败时静默忽略
   }, []);

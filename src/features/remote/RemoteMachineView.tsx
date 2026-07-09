@@ -7,9 +7,13 @@ import { MarkdownContent } from '@/components/ui/MarkdownContent';
 import { useModelProviders, type ModelProvider } from '@/features/models/ModelProvidersContext';
 import { streamChat, type LLMMessage, type TokenStats } from '@/services/llmClient';
 import {
-	getSetting,
+	deleteHyperVVmCredentialsByParentProfileId,
+	deleteRemoteMachineProfile,
+	importLegacyHyperVVmCredentialProfiles,
+	importLegacyRemoteMachineProfiles,
+	listHyperVVmCredentialProfiles,
+	listRemoteMachineProfiles,
 	rdpOpen,
-	setSetting,
 	sshConnect,
 	sshDisconnect,
 	sshGetDisks,
@@ -22,7 +26,10 @@ import {
 	sshWriteFile,
 	subscribeRemoteFileChanged,
 	subscribeWinRmOpenSshSetupOutput,
+	upsertRemoteMachineProfile,
+	upsertHyperVVmCredentialProfile,
 	winRmRunOpenSshSetup,
+	type HyperVVmCredentialProfile,
 	type HyperVVirtualMachine,
 	type RemoteConnection,
 	type RemoteFileEntry,
@@ -49,19 +56,6 @@ interface WinRmTerminalLine {
 	text: string;
 }
 
-interface HyperVVmCredentialProfile {
-	id: string;
-	label: string;
-	host: string;
-	port: string;
-	username: string;
-	password: string;
-	parentProfileId: string;
-	vmId: string;
-	vmName: string;
-	lastConnectedAt: string;
-}
-
 interface PendingVmConnection {
 	parentConnection: RemoteConnection;
 	vm: HyperVVirtualMachine;
@@ -81,6 +75,12 @@ interface WinRmOpenSshSetupTarget {
 	username?: string;
 	password?: string;
 	sshPort?: string;
+}
+
+interface RemoteMachineImportResult {
+	profiles: RemoteMachineProfile[];
+	vmCredentials: HyperVVmCredentialProfile[];
+	skipped: number;
 }
 
 const EMPTY_TREE_RECORD: Record<string, TreeNode[]> = {};
@@ -962,15 +962,14 @@ function getFileIcon(name: string): string {
 const fieldCls =
 	'glass glass-input w-full rounded-xl px-3 py-2 text-sm text-white placeholder:text-white/30 focus:outline-none';
 
-const REMOTE_PROFILES_SETTING_KEY = 'remote.machine.profiles.v1';
-const VM_CREDENTIALS_SETTING_KEY = 'remote.hyperv.vm.credentials.v1';
 const MAX_REMOTE_PROFILES = 12;
 const MAX_VM_CREDENTIALS = 80;
+const PROFILE_REFRESH_INTERVAL_MS = 5000;
+const HYPERV_REFRESH_INTERVAL_MS = 8000;
 const VM_START_IP_REFRESH_ATTEMPTS = 6;
 const VM_START_IP_REFRESH_DELAY_MS = 1200;
 const DEFAULT_RDP_PORT = '3389';
 const DEFAULT_WINRM_PORT = 5985;
-const OPENSSH_SETUP_SCRIPT_URL = '/downloads/configure-windows-ssh-server.ps1';
 
 interface RemoteActionButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
 	icon: string;
@@ -1026,36 +1025,74 @@ function profileLabel(profile: Pick<RemoteMachineProfile, 'host' | 'port' | 'use
 	return profile.label.trim() || `${profile.username}@${profile.host}:${normalizePort(profile.port)}`;
 }
 
-function parseProfiles(raw: string | null): RemoteMachineProfile[] {
-	if (!raw) return [];
-	try {
-		const parsed: unknown = JSON.parse(raw);
-		if (!Array.isArray(parsed)) return [];
-		return parsed
-			.filter((item): item is Partial<RemoteMachineProfile> => !!item && typeof item === 'object')
-			.map((item) => {
-				const hostValue = String(item.host ?? '').trim();
-				const usernameValue = String(item.username ?? '').trim();
-				const portValue = normalizePort(String(item.port ?? '22'));
-				const rdpPortValue = normalizeRdpPort(item.rdpPort);
-				if (!hostValue || !usernameValue) return null;
-				const profile: RemoteMachineProfile = {
-					id: String(item.id ?? profileId(hostValue, portValue, usernameValue)),
-					label: String(item.label ?? ''),
-					host: hostValue,
-					port: portValue,
-					rdpPort: rdpPortValue,
-					username: usernameValue,
-					password: String(item.password ?? ''),
-					lastConnectedAt: String(item.lastConnectedAt ?? ''),
-				};
-				return { ...profile, label: profileLabel(profile) };
-			})
-			.filter((item): item is RemoteMachineProfile => item !== null)
-			.slice(0, MAX_REMOTE_PROFILES);
-	} catch {
-		return [];
+function hostIdentity(hostValue: string): string {
+	return hostValue.trim().toLowerCase();
+}
+
+function findHostConflict(
+	profiles: RemoteMachineProfile[],
+	nextProfile: RemoteMachineProfile,
+	previousProfileId?: string | null,
+): RemoteMachineProfile | undefined {
+	const nextHost = hostIdentity(nextProfile.host);
+	if (!nextHost) return undefined;
+	const allowedIds = new Set(
+		[nextProfile.id, previousProfileId ?? ''].filter((id): id is string => Boolean(id)),
+	);
+	return profiles.find((profile) => hostIdentity(profile.host) === nextHost && !allowedIds.has(profile.id));
+}
+
+function hostConflictMessage(profile: RemoteMachineProfile): string {
+	return `已存在这台宿主机：${profileLabel(profile)}（${profile.host}:${normalizePort(profile.port)} / ${profile.username}）`;
+}
+
+function isObjectRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function stringifyImportValue(value: unknown): string {
+	if (typeof value === 'string' || typeof value === 'number') return String(value);
+	return '';
+}
+
+function getImportProfileItems(payload: unknown): unknown[] {
+	if (Array.isArray(payload)) return payload;
+	if (isObjectRecord(payload)) {
+		const wrappedItems = [payload.profiles, payload.machines, payload.remoteMachines].find(Array.isArray);
+		if (wrappedItems) return wrappedItems;
+		if (Array.isArray(payload.hypervVmCredentials) || Array.isArray(payload.vmCredentials)) return [];
 	}
+	throw new Error('导入文件必须是机器数组，或包含 profiles / machines / hypervVmCredentials 数组。');
+}
+
+function getImportVmCredentialItems(payload: unknown): unknown[] {
+	if (!isObjectRecord(payload)) return [];
+	const wrappedItems = [payload.hypervVmCredentials, payload.vmCredentials].find(Array.isArray);
+	return wrappedItems ?? [];
+}
+
+function normalizeProfiles(items: RemoteMachineProfile[]): RemoteMachineProfile[] {
+	return items
+		.map((item) => {
+			const hostValue = String(item.host ?? '').trim();
+			const usernameValue = String(item.username ?? '').trim();
+			const portValue = normalizePort(String(item.port ?? '22'));
+			const rdpPortValue = normalizeRdpPort(item.rdpPort);
+			if (!hostValue || !usernameValue) return null;
+			const profile: RemoteMachineProfile = {
+				id: String(item.id ?? profileId(hostValue, portValue, usernameValue)),
+				label: String(item.label ?? ''),
+				host: hostValue,
+				port: portValue,
+				rdpPort: rdpPortValue,
+				username: usernameValue,
+				password: String(item.password ?? ''),
+				lastConnectedAt: String(item.lastConnectedAt ?? ''),
+			};
+			return { ...profile, label: profileLabel(profile) };
+		})
+		.filter((item): item is RemoteMachineProfile => item !== null)
+		.slice(0, MAX_REMOTE_PROFILES);
 }
 
 function buildProfile(
@@ -1081,40 +1118,105 @@ function buildProfile(
 	return { ...profile, label: profileLabel(profile) };
 }
 
-function parseVmCredentials(raw: string | null): Record<string, HyperVVmCredentialProfile> {
-	if (!raw) return {};
-	try {
-		const parsed: unknown = JSON.parse(raw);
-		if (!Array.isArray(parsed)) return {};
-		return Object.fromEntries(
-			parsed
-				.filter((item): item is Partial<HyperVVmCredentialProfile> => !!item && typeof item === 'object')
-				.map((item) => {
-					const id = String(item.id ?? '').trim();
-					const hostValue = String(item.host ?? '').trim();
-					const usernameValue = String(item.username ?? '').trim();
-					const vmIdValue = String(item.vmId ?? '').trim();
-					const parentProfileIdValue = String(item.parentProfileId ?? '').trim();
-					if (!id || !vmIdValue || !parentProfileIdValue) return null;
-					const credential: HyperVVmCredentialProfile = {
-						id,
-						label: String(item.label ?? ''),
-						host: hostValue,
-						port: normalizePort(String(item.port ?? '22')),
-						username: usernameValue,
-						password: String(item.password ?? ''),
-						parentProfileId: parentProfileIdValue,
-						vmId: vmIdValue,
-						vmName: String(item.vmName ?? vmIdValue),
-						lastConnectedAt: String(item.lastConnectedAt ?? ''),
-					};
-					return [credential.id, credential] as const;
-				})
-				.filter((item): item is readonly [string, HyperVVmCredentialProfile] => item !== null),
+function parseRemoteMachineImportPayload(payload: unknown): RemoteMachineImportResult {
+	const items = getImportProfileItems(payload);
+	const vmItems = getImportVmCredentialItems(payload);
+	let skipped = 0;
+	const profiles: RemoteMachineProfile[] = [];
+	const vmCredentials: HyperVVmCredentialProfile[] = [];
+
+	for (const item of items) {
+		if (!isObjectRecord(item)) {
+			skipped += 1;
+			continue;
+		}
+
+		const hostValue = stringifyImportValue(item.host).trim();
+		const usernameValue = stringifyImportValue(item.username).trim();
+		if (!hostValue || !usernameValue) {
+			skipped += 1;
+			continue;
+		}
+
+		const portValue = normalizePort(stringifyImportValue(item.port));
+		const rdpPortValue = normalizeRdpPort(item.rdpPort === undefined ? undefined : stringifyImportValue(item.rdpPort));
+		const passwordValue = stringifyImportValue(item.password);
+		const labelValue = stringifyImportValue(item.label) || stringifyImportValue(item.name);
+		profiles.push(
+			buildProfile(hostValue, portValue, rdpPortValue, usernameValue, passwordValue, undefined, labelValue),
 		);
-	} catch {
-		return {};
 	}
+
+	for (const item of vmItems) {
+		if (!isObjectRecord(item)) {
+			skipped += 1;
+			continue;
+		}
+
+		const parentProfileIdValue = stringifyImportValue(item.parentProfileId).trim();
+		const vmNameValue = stringifyImportValue(item.vmName).trim();
+		const vmIdValue = stringifyImportValue(item.vmId).trim() || vmNameValue;
+		const usernameValue = stringifyImportValue(item.username).trim();
+		if (!parentProfileIdValue || !vmIdValue || !usernameValue) {
+			skipped += 1;
+			continue;
+		}
+
+		const idValue = stringifyImportValue(item.id).trim() || `${parentProfileIdValue}:${vmIdValue}`;
+		vmCredentials.push({
+			id: idValue,
+			label: vmNameValue,
+			host: stringifyImportValue(item.host).trim(),
+			port: normalizePort(stringifyImportValue(item.port)),
+			username: usernameValue,
+			password: stringifyImportValue(item.password),
+			parentProfileId: parentProfileIdValue,
+			vmId: vmIdValue,
+			vmName: vmNameValue || vmIdValue,
+			lastConnectedAt: stringifyImportValue(item.lastConnectedAt).trim() || new Date().toISOString(),
+		});
+	}
+
+	const normalizedProfiles = normalizeProfiles(profiles);
+	const normalizedVmCredentials = normalizeVmCredentialList(vmCredentials);
+	return {
+		profiles: normalizedProfiles,
+		vmCredentials: normalizedVmCredentials,
+		skipped:
+			skipped +
+			Math.max(0, profiles.length - normalizedProfiles.length) +
+			Math.max(0, vmCredentials.length - normalizedVmCredentials.length),
+	};
+}
+
+function normalizeVmCredentialList(items: HyperVVmCredentialProfile[]): HyperVVmCredentialProfile[] {
+	return items
+		.map((item) => {
+			const id = String(item.id ?? '').trim();
+			const parentProfileIdValue = String(item.parentProfileId ?? '').trim();
+			const vmIdValue = String(item.vmId ?? '').trim();
+			const usernameValue = String(item.username ?? '').trim();
+			if (!id || !parentProfileIdValue || !vmIdValue || !usernameValue) return null;
+			return {
+				id,
+				label: String(item.label ?? '').trim() || String(item.vmName ?? vmIdValue),
+				host: String(item.host ?? '').trim(),
+				port: normalizePort(String(item.port ?? '22')),
+				username: usernameValue,
+				password: String(item.password ?? ''),
+				parentProfileId: parentProfileIdValue,
+				vmId: vmIdValue,
+				vmName: String(item.vmName ?? vmIdValue),
+				lastConnectedAt: String(item.lastConnectedAt ?? ''),
+			};
+		})
+		.filter((item): item is HyperVVmCredentialProfile => item !== null)
+		.sort((a, b) => b.lastConnectedAt.localeCompare(a.lastConnectedAt))
+		.slice(0, MAX_VM_CREDENTIALS);
+}
+
+function vmCredentialMap(items: HyperVVmCredentialProfile[]): Record<string, HyperVVmCredentialProfile> {
+	return Object.fromEntries(normalizeVmCredentialList(items).map((credential) => [credential.id, credential]));
 }
 
 function parentCredentialScope(connection: RemoteConnection): string {
@@ -1265,6 +1367,10 @@ export function RemoteMachineView() {
 	const [winRmRunId, setWinRmRunId] = useState<string | null>(null);
 	const winRmRunIdRef = useRef<string | null>(null);
 	const winRmTerminalScrollRef = useRef<HTMLDivElement | null>(null);
+	const importFileRef = useRef<HTMLInputElement | null>(null);
+	const [importingProfiles, setImportingProfiles] = useState(false);
+	const [importNotice, setImportNotice] = useState('');
+	const [importError, setImportError] = useState('');
 
 	// 在线连接池
 	const [connections, setConnections] = useState<RemoteConnection[]>([]);
@@ -1407,18 +1513,32 @@ export function RemoteMachineView() {
 		winRmTerminalScrollRef.current?.scrollTo({ top: winRmTerminalScrollRef.current.scrollHeight });
 	}, [winRmTerminalLines, winRmTerminalOpen]);
 
+	const refreshProfileData = useCallback(async () => {
+		const [nextProfiles, nextCredentials] = await Promise.all([
+			listRemoteMachineProfiles(),
+			listHyperVVmCredentialProfiles(),
+		]);
+		setProfiles(normalizeProfiles(nextProfiles));
+		setVmCredentials(vmCredentialMap(nextCredentials));
+	}, []);
+
 	useEffect(() => {
 		let cancelled = false;
-		getSetting(REMOTE_PROFILES_SETTING_KEY)
-			.then((raw) => {
-				if (!cancelled) setProfiles(parseProfiles(raw));
+		importLegacyRemoteMachineProfiles()
+			.catch(() => listRemoteMachineProfiles())
+			.then((nextProfiles) => {
+				if (!cancelled) setProfiles(normalizeProfiles(nextProfiles));
 			})
-			.catch(() => {
-				if (!cancelled) setProfiles([]);
+			.catch((err) => {
+				if (!cancelled) {
+					setProfiles([]);
+					setConnError(String(err));
+				}
 			});
-		getSetting(VM_CREDENTIALS_SETTING_KEY)
-			.then((raw) => {
-				if (!cancelled) setVmCredentials(parseVmCredentials(raw));
+		importLegacyHyperVVmCredentialProfiles()
+			.catch(() => listHyperVVmCredentialProfiles())
+			.then((nextCredentials) => {
+				if (!cancelled) setVmCredentials(vmCredentialMap(nextCredentials));
 			})
 			.catch(() => {
 				if (!cancelled) setVmCredentials({});
@@ -1428,40 +1548,42 @@ export function RemoteMachineView() {
 		};
 	}, []);
 
-	function persistProfiles(nextProfiles: RemoteMachineProfile[]) {
-		setProfiles(nextProfiles);
-		void setSetting(REMOTE_PROFILES_SETTING_KEY, JSON.stringify(nextProfiles)).catch(() => {});
+	useEffect(() => {
+		let cancelled = false;
+		let running = false;
+
+		const tick = async () => {
+			if (cancelled || running || document.hidden) return;
+			running = true;
+			try {
+				await refreshProfileData();
+			} catch {
+				/* keep the current list if MySQL is temporarily unavailable */
+			} finally {
+				running = false;
+			}
+		};
+
+		const timer = window.setInterval(tick, PROFILE_REFRESH_INTERVAL_MS);
+		window.addEventListener('visibilitychange', tick);
+
+		return () => {
+			cancelled = true;
+			window.clearInterval(timer);
+			window.removeEventListener('visibilitychange', tick);
+		};
+	}, [refreshProfileData]);
+
+	async function upsertProfile(nextProfile: RemoteMachineProfile, previousProfileId?: string | null) {
+		const nextProfiles = await upsertRemoteMachineProfile(nextProfile, previousProfileId);
+		setProfiles(normalizeProfiles(nextProfiles));
+		setConnError('');
 	}
 
-	function upsertProfile(nextProfile: RemoteMachineProfile, previousProfileId?: string | null) {
-		const nextProfiles = [
-			nextProfile,
-			...profiles.filter((profile) => profile.id !== nextProfile.id && profile.id !== previousProfileId),
-		].slice(0, MAX_REMOTE_PROFILES);
-		persistProfiles(nextProfiles);
-	}
-
-	function persistVmCredentials(nextCredentials: Record<string, HyperVVmCredentialProfile>) {
-		const values = Object.values(nextCredentials)
-			.sort((a, b) => b.lastConnectedAt.localeCompare(a.lastConnectedAt))
-			.slice(0, MAX_VM_CREDENTIALS);
-		const nextMap = Object.fromEntries(values.map((credential) => [credential.id, credential]));
-		setVmCredentials(nextMap);
-		void setSetting(VM_CREDENTIALS_SETTING_KEY, JSON.stringify(values)).catch(() => {});
-	}
-
-	function persistVmCredential(credential: HyperVVmCredentialProfile) {
-		persistVmCredentials({
-			...Object.fromEntries(
-				Object.entries(vmCredentials).filter(
-					([id, item]) =>
-						id === credential.id ||
-						item.parentProfileId !== credential.parentProfileId ||
-						item.vmId !== credential.vmId,
-				),
-			),
-			[credential.id]: credential,
-		});
+	async function persistVmCredential(credential: HyperVVmCredentialProfile) {
+		const nextCredentials = await upsertHyperVVmCredentialProfile(credential);
+		setVmCredentials(vmCredentialMap(nextCredentials));
+		setConnError('');
 	}
 
 	function findVmCredential(
@@ -1516,38 +1638,102 @@ export function RemoteMachineView() {
 		setConnError('');
 	}
 
-	function deleteProfile(id: string) {
-		persistProfiles(profiles.filter((profile) => profile.id !== id));
+	async function deleteProfile(id: string) {
+		const nextProfiles = await deleteRemoteMachineProfile(id);
+		setProfiles(normalizeProfiles(nextProfiles));
+		setConnError('');
 	}
 
 	async function handleDeleteProfile(profile: RemoteMachineProfile) {
-		deleteProfile(profile.id);
-		persistVmCredentials(
-			Object.fromEntries(
-				Object.entries(vmCredentials).filter(([, credential]) => credential.parentProfileId !== profile.id),
-			),
-		);
-		const connection = connections.find((item) => item.kind === 'host' && item.parentProfileId === profile.id);
-		if (connection) await handleDisconnect(connection.id);
+		try {
+			await deleteProfile(profile.id);
+			const nextCredentials = await deleteHyperVVmCredentialsByParentProfileId(profile.id);
+			setVmCredentials(vmCredentialMap(nextCredentials));
+			const connection = connections.find((item) => item.kind === 'host' && item.parentProfileId === profile.id);
+			if (connection) await handleDisconnect(connection.id);
+		} catch (err: unknown) {
+			setConnError(String(err));
+		}
 	}
 
-	function saveProfileFromForm() {
+	async function saveProfileFromForm() {
 		if (pendingVmConnection) {
 			if (!username.trim()) return;
 			const credential = buildVmCredentialFromForm(pendingVmConnection);
-			persistVmCredential(credential);
-			setConfigOpen(false);
+			try {
+				await persistVmCredential(credential);
+				setConfigOpen(false);
+			} catch (err: unknown) {
+				setConnError(String(err));
+			}
 			return;
 		}
 		if (!host.trim() || !username.trim()) return;
 		const nextProfile = buildProfile(host, port, rdpPort, username, password, undefined, profileName);
-		upsertProfile(nextProfile, editingProfileId);
-		setConfigOpen(false);
+		const hostConflict = findHostConflict(profiles, nextProfile, editingProfileId);
+		if (hostConflict) {
+			setConnError(hostConflictMessage(hostConflict));
+			return;
+		}
+		try {
+			await upsertProfile(nextProfile, editingProfileId);
+			setConfigOpen(false);
+		} catch (err: unknown) {
+			setConnError(String(err));
+		}
 	}
 
 	function openNewProfileForm() {
 		resetProfileForm();
+		setImportError('');
+		setImportNotice('');
 		setConfigOpen(true);
+	}
+
+	async function handleImportProfileFile(event: React.ChangeEvent<HTMLInputElement>) {
+		const selectedImportFile = event.target.files?.[0];
+		event.target.value = '';
+		if (!selectedImportFile) return;
+
+		setImportingProfiles(true);
+		setImportError('');
+		setImportNotice('');
+		try {
+			const fileText = await selectedImportFile.text();
+			const parsedPayload: unknown = JSON.parse(fileText);
+			const {
+				profiles: importedProfiles,
+				vmCredentials: importedVmCredentials,
+				skipped,
+			} = parseRemoteMachineImportPayload(parsedPayload);
+			if (importedProfiles.length === 0 && importedVmCredentials.length === 0) {
+				setImportError(
+					skipped > 0
+						? `没有可导入的机器或 Hyper-V VM 凭据，已跳过 ${skipped} 条无效记录。`
+						: '没有找到可导入的机器或 Hyper-V VM 凭据。',
+				);
+				return;
+			}
+
+			let latestProfiles: RemoteMachineProfile[] | null = null;
+			for (const importedProfile of importedProfiles) {
+				latestProfiles = await upsertRemoteMachineProfile(importedProfile);
+			}
+			let latestVmCredentials: HyperVVmCredentialProfile[] | null = null;
+			for (const importedVmCredential of importedVmCredentials) {
+				latestVmCredentials = await upsertHyperVVmCredentialProfile(importedVmCredential);
+			}
+
+			if (latestProfiles) setProfiles(normalizeProfiles(latestProfiles));
+			if (latestVmCredentials) setVmCredentials(vmCredentialMap(latestVmCredentials));
+			setImportNotice(
+				`已导入 ${importedProfiles.length} 台机器、${importedVmCredentials.length} 条 Hyper-V VM 凭据${skipped > 0 ? `，跳过 ${skipped} 条无效记录` : ''}。`,
+			);
+		} catch (err: unknown) {
+			setImportError(`导入失败：${err instanceof Error ? err.message : String(err)}`);
+		} finally {
+			setImportingProfiles(false);
+		}
 	}
 
 	function resetEditorState() {
@@ -1596,12 +1782,38 @@ export function RemoteMachineView() {
 		setConnectionTrees((prev) => ({ ...prev, [connectionId]: initTrees }));
 	}
 
-	async function refreshHyperV(connectionId: string): Promise<HyperVVirtualMachine[]> {
+	const refreshHyperV = useCallback(async (connectionId: string): Promise<HyperVVirtualMachine[]> => {
 		const vms = await sshListHyperVVMs(connectionId).catch(() => []);
 		setConnectionHypervVms((prev) => ({ ...prev, [connectionId]: vms }));
-		setHypervExpanded((prev) => ({ ...prev, [connectionId]: vms.length > 0 }));
+		setHypervExpanded((prev) => ({ ...prev, [connectionId]: prev[connectionId] ?? vms.length > 0 }));
 		return vms;
-	}
+	}, []);
+
+	useEffect(() => {
+		const hostConnections = connections.filter((connection) => connection.kind === 'host');
+		if (hostConnections.length === 0) return;
+
+		let cancelled = false;
+		let running = false;
+
+		const tick = async () => {
+			if (cancelled || running || document.hidden) return;
+			running = true;
+			try {
+				await Promise.all(hostConnections.map((connection) => refreshHyperV(connection.id)));
+			} finally {
+				running = false;
+			}
+		};
+
+		const timer = window.setInterval(tick, HYPERV_REFRESH_INTERVAL_MS);
+		void tick();
+
+		return () => {
+			cancelled = true;
+			window.clearInterval(timer);
+		};
+	}, [connections, refreshHyperV]);
 
 	function updateVmPowerState(connectionId: string, vm: HyperVVirtualMachine, state: string) {
 		setConnectionHypervVms((prev) => {
@@ -1636,15 +1848,22 @@ export function RemoteMachineView() {
 		const passwordValue = profile?.password ?? password;
 		if (!hostValue || !usernameValue) return;
 
+		const baseProfile =
+			profile ?? buildProfile(hostValue, portValue, rdpPortValue, usernameValue, passwordValue, undefined, profileName);
+		if (!pendingVm) {
+			const hostConflict = findHostConflict(profiles, baseProfile, profile?.id ?? editingProfileId);
+			if (hostConflict) {
+				setConnError(hostConflictMessage(hostConflict));
+				return;
+			}
+		}
+
 		if (profile) applyProfile(profile);
 		setConnStatus('connecting');
 		setConnError('');
 		setConnectingProfileId(profile?.id ?? null);
 		setConnectingVmKey(pendingVm?.credentialKey ?? null);
 		try {
-			const baseProfile =
-				profile ??
-				buildProfile(hostValue, portValue, rdpPortValue, usernameValue, passwordValue, undefined, profileName);
 			const connection = await sshConnect({
 				host: hostValue,
 				port: Number(portValue),
@@ -1663,9 +1882,9 @@ export function RemoteMachineView() {
 
 			if (pendingVm) {
 				const credential = buildVmCredentialFromForm(pendingVm);
-				persistVmCredential(credential);
+				await persistVmCredential(credential);
 			} else {
-				upsertProfile(
+				await upsertProfile(
 					buildProfile(
 						hostValue,
 						portValue,
@@ -2199,7 +2418,7 @@ export function RemoteMachineView() {
 			setConnections((prev) => [...prev, connection]);
 			switchActiveConnection(connection.id);
 			await loadConnectionFileTree(connection.id);
-			persistVmCredential(nextCredential);
+			await persistVmCredential(nextCredential);
 			setConnStatus('connected');
 			setConfigOpen(false);
 			setPendingVmConnection(null);
@@ -2248,15 +2467,6 @@ export function RemoteMachineView() {
 	function vmPowerAction(vm: HyperVVirtualMachine): 'start' | 'stop' {
 		const state = vm.state.trim().toLowerCase();
 		return state === 'off' || state === 'offcritical' ? 'start' : 'stop';
-	}
-
-	function downloadOpenSshSetupScript() {
-		const link = document.createElement('a');
-		link.href = OPENSSH_SETUP_SCRIPT_URL;
-		link.download = 'configure-windows-ssh-server.ps1';
-		document.body.appendChild(link);
-		link.click();
-		link.remove();
 	}
 
 	function appendWinRmTerminalLine(stream: WinRmTerminalLine['stream'], text: string) {
@@ -2473,26 +2683,20 @@ export function RemoteMachineView() {
 						</span>
 					</div>
 				</div>
-				<div className="flex items-center gap-2">
-					<button
-						type="button"
-						onClick={downloadOpenSshSetupScript}
-						title="Download OpenSSH setup script"
-						className="flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium text-white/65 transition-all hover:text-white"
-						style={{
-							background: 'rgb(var(--glass-rgb) / 0.08)',
-							border: '1px solid rgb(255 255 255 / 0.12)',
-						}}
-					>
-						<Icon name="download" className="h-3.5 w-3.5" aria-hidden="true" />
-						Script
-					</button>
+				<div className="flex items-center gap-1">
+					<input
+						ref={importFileRef}
+						type="file"
+						accept="application/json,.json"
+						className="hidden"
+						onChange={(event) => void handleImportProfileFile(event)}
+					/>
 					<button
 						type="button"
 						onClick={openAnalysisModal}
 						disabled={!canOpenAnalysis}
 						title={analysisButtonTitle}
-						className="flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium text-white transition-all disabled:cursor-not-allowed disabled:opacity-35"
+						className="flex h-8 items-center gap-1 rounded-lg px-2 text-xs font-medium text-white transition-all disabled:cursor-not-allowed disabled:opacity-35"
 						style={{
 							background: 'rgb(var(--glass-rgb) / 0.08)',
 							border: '1px solid rgb(255 255 255 / 0.12)',
@@ -2503,17 +2707,66 @@ export function RemoteMachineView() {
 					</button>
 					<button
 						type="button"
-						onClick={openNewProfileForm}
-						className="rounded-lg px-3 py-1.5 text-xs font-medium text-white transition-all"
+						onClick={() => importFileRef.current?.click()}
+						disabled={importingProfiles}
+						className="flex h-8 items-center gap-1 rounded-lg px-2 text-xs font-medium text-white transition-all disabled:cursor-not-allowed disabled:opacity-35"
 						style={{
-							background: 'rgb(var(--accent-rgb) / 0.15)',
-							border: '1px solid rgb(var(--accent-rgb) / 0.35)',
+							background: 'rgb(var(--glass-rgb) / 0.08)',
+							border: '1px solid rgb(255 255 255 / 0.12)',
 						}}
 					>
-						New
+						<Icon
+							name={importingProfiles ? 'loader' : 'upload'}
+							className={`h-3.5 w-3.5 ${importingProfiles ? 'animate-spin' : ''}`}
+							aria-hidden="true"
+						/>
+						Import
+					</button>
+					<a
+						href="/downloads/remote-machine-import-template.json"
+						download
+						className="flex h-8 items-center gap-1 rounded-lg px-2 text-xs font-medium text-white/65 transition-all hover:text-white"
+						style={{
+							background: 'rgb(var(--glass-rgb) / 0.06)',
+							border: '1px solid rgb(255 255 255 / 0.1)',
+						}}
+						title="下载导入 JSON 模板"
+						aria-label="下载导入 JSON 模板"
+					>
+						<Icon name="download" className="h-3.5 w-3.5" aria-hidden="true" />
+						模板
+					</a>
+					<button
+						type="button"
+						onClick={openNewProfileForm}
+						className="flex h-8 w-8 items-center justify-center rounded-lg text-white/75 transition-all hover:text-white"
+						style={{
+							background: 'rgb(var(--glass-rgb) / 0.08)',
+							border: '1px solid rgb(255 255 255 / 0.12)',
+						}}
+						title="新增远程机器"
+						aria-label="新增远程机器"
+					>
+						<Icon name="plus" className="h-4 w-4" aria-hidden="true" />
 					</button>
 				</div>
 			</div>
+
+			<AnimatePresence>
+				{(importNotice || importError) && (
+					<motion.div
+						initial={{ opacity: 0, y: -4 }}
+						animate={{ opacity: 1, y: 0 }}
+						exit={{ opacity: 0, y: -4 }}
+						className={`flex shrink-0 items-center gap-2 rounded-xl px-3 py-2 text-[11px] leading-relaxed ${
+							importError ? 'bg-rose-500/10 text-rose-300' : 'bg-emerald-500/10 text-emerald-300'
+						}`}
+					>
+						<Icon name={importError ? 'x' : 'check'} className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+						<span className="min-w-0 flex-1">{importError || importNotice}</span>
+					</motion.div>
+				)}
+			</AnimatePresence>
 
 			<AnimatePresence>
 				{configOpen && (
@@ -2529,7 +2782,7 @@ export function RemoteMachineView() {
 							animate={{ opacity: 1, scale: 1, y: 0 }}
 							exit={{ opacity: 0, scale: 0.96, y: 10 }}
 							transition={{ duration: 0.18, ease: 'easeOut' }}
-							className="glass app-card dark-popover relative w-full max-w-[340px] overflow-hidden px-3.5 py-3.5 shadow-2xl"
+							className="glass app-popover relative w-full max-w-[340px] overflow-hidden px-3.5 py-3.5 shadow-2xl"
 							onMouseDown={(event) => event.stopPropagation()}
 						>
 							<div className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-white/70 to-transparent" />
@@ -2545,9 +2798,11 @@ export function RemoteMachineView() {
 								<button
 									type="button"
 									onClick={() => setConfigOpen(false)}
-									className="rounded-lg bg-white/[0.04] px-2.5 py-1 text-[11px] text-white/40 transition-colors hover:text-white/70"
+									className="glass glass-icon-button glass-control h-8 w-8 shrink-0 rounded-full"
+									aria-label="关闭"
+									title="关闭"
 								>
-									Close
+									<Icon name="x" className="h-4 w-4" aria-hidden="true" />
 								</button>
 							</div>
 
@@ -2644,14 +2899,7 @@ export function RemoteMachineView() {
 							<div className="mt-3 flex justify-end gap-2">
 								<button
 									type="button"
-									onClick={() => setConfigOpen(false)}
-									className="rounded-lg bg-white/[0.04] px-3 py-2 text-xs text-white/45 transition-colors hover:text-white/70"
-								>
-									Cancel
-								</button>
-								<button
-									type="button"
-									onClick={saveProfileFromForm}
+									onClick={() => void saveProfileFromForm()}
 									disabled={isVmCredentialForm ? !username.trim() : !host.trim() || !username.trim()}
 									className="rounded-lg bg-white/[0.04] px-3 py-2 text-xs text-white/55 transition-colors hover:text-white disabled:cursor-not-allowed disabled:opacity-35"
 								>
@@ -2660,7 +2908,6 @@ export function RemoteMachineView() {
 								<button
 									type="button"
 									onClick={() => {
-										saveProfileFromForm();
 										void handleConnect();
 									}}
 									disabled={isConnecting || !host.trim() || !username.trim()}
@@ -2692,7 +2939,7 @@ export function RemoteMachineView() {
 							animate={{ opacity: 1, scale: 1, y: 0 }}
 							exit={{ opacity: 0, scale: 0.96, y: 10 }}
 							transition={{ duration: 0.18, ease: 'easeOut' }}
-							className="glass app-card dark-popover relative flex h-[min(78vh,680px)] w-full max-w-[760px] flex-col overflow-hidden shadow-2xl"
+							className="glass app-popover relative flex h-[min(78vh,680px)] w-full max-w-[760px] flex-col overflow-hidden shadow-2xl"
 							onMouseDown={(event) => event.stopPropagation()}
 						>
 							<div className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-white/70 to-transparent" />
@@ -2733,7 +2980,7 @@ export function RemoteMachineView() {
 													initial={{ opacity: 0, y: -4 }}
 													animate={{ opacity: 1, y: 0 }}
 													exit={{ opacity: 0, y: -4 }}
-													className="glass app-card dark-popover absolute right-0 top-full z-20 mt-2 max-h-64 w-72 overflow-y-auto rounded-xl p-1.5 shadow-2xl"
+													className="glass app-popover absolute right-0 top-full z-20 mt-2 max-h-64 w-72 overflow-y-auto rounded-xl p-1.5 shadow-2xl"
 												>
 													{providers.map((provider) => {
 														const meta = PROVIDER_LABELS[provider.provider];
@@ -2931,7 +3178,7 @@ export function RemoteMachineView() {
 						exit={{ opacity: 0, y: 12 }}
 						transition={{ duration: 0.18, ease: 'easeOut' }}
 						onClick={restoreAnalysisModal}
-						className="glass app-card dark-popover fixed bottom-4 right-16 z-50 flex max-w-[min(360px,calc(100vw-6rem))] items-center gap-2 rounded-xl px-3 py-2 text-left shadow-2xl transition-colors hover:bg-white/[0.08]"
+						className="glass app-popover fixed bottom-4 right-16 z-50 flex max-w-[min(360px,calc(100vw-6rem))] items-center gap-2 rounded-xl px-3 py-2 text-left shadow-2xl transition-colors hover:bg-white/[0.08]"
 						title="恢复文件内容分析窗口"
 					>
 						{isAnalyzing ? (
@@ -2960,14 +3207,14 @@ export function RemoteMachineView() {
 					<div className="glass app-card relative flex min-h-0 flex-1 flex-col overflow-hidden">
 						<div className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-white/70 to-transparent" />
 						<div className="flex shrink-0 items-center justify-between border-b border-white/[0.06] px-3.5 py-2">
-							<span className="text-xs font-medium text-white/60">远程机器</span>
+							<span className="text-xs font-medium text-white/60">机器列表</span>
 							<span className="text-[10px] text-white/25">{profiles.length} 台</span>
 						</div>
 						<div className="min-h-0 flex-1 overflow-y-auto p-2">
 							{profiles.length === 0 ? (
 								<div className="flex h-full min-h-24 flex-col items-center justify-center gap-1 text-center text-white/25">
 									<span className="text-sm">暂无配置</span>
-									<span className="text-[11px]">点击右上角 New 添加远程机器</span>
+									<span className="text-[11px]">点击右上角 + 添加，或导入 JSON</span>
 								</div>
 							) : (
 								<div className="space-y-1.5">

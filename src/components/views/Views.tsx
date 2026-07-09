@@ -4,6 +4,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { AnimatePresence, motion, useInView } from 'framer-motion';
 import { GlassCard } from '@/components/ui/GlassCard';
+import { Icon } from '@/components/ui/Icon';
 import { MarkdownContent } from '@/components/ui/MarkdownContent';
 import {
   useModelProviders,
@@ -118,7 +119,7 @@ function GlassSelect({ value, options, onChange }: {
             exit={{ opacity: 0, scale: 0.96, y: -6 }}
             transition={{ duration: 0.15, ease: [0.16, 1, 0.3, 1] }}
             style={{ position: 'fixed', top: pos.top, left: pos.left, width: 280, height: 220, zIndex: 9999 }}
-            className="dark-popover flex flex-col overflow-hidden rounded-2xl border border-white/[0.13] bg-[rgb(14_18_28/0.97)] shadow-2xl shadow-black/70 backdrop-blur-2xl"
+            className="glass app-popover flex flex-col overflow-hidden rounded-2xl shadow-2xl"
             onMouseEnter={() => { if (closeTimerRef.current) { clearTimeout(closeTimerRef.current); closeTimerRef.current = null; } }}
             onMouseLeave={scheduleClose}
           >
@@ -131,11 +132,11 @@ function GlassSelect({ value, options, onChange }: {
               <button
                 type="button"
                 onClick={() => setOpen(false)}
-                className="flex h-5 w-5 items-center justify-center rounded-full text-white/40 transition-colors hover:bg-white/[0.08] hover:text-white"
+                className="glass glass-icon-button glass-control h-6 w-6 rounded-full"
+                aria-label="关闭"
+                title="关闭"
               >
-                <svg viewBox="0 0 10 10" className="h-2.5 w-2.5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
-                  <line x1="2" y1="2" x2="8" y2="8" /><line x1="8" y1="2" x2="2" y2="8" />
-                </svg>
+                <Icon name="x" className="h-3.5 w-3.5" aria-hidden="true" />
               </button>
             </div>
 
@@ -279,7 +280,7 @@ function ProviderModal({
         className="pointer-events-none fixed inset-0 z-50 flex items-center justify-center"
       >
         <div
-          className="glass dark-popover pointer-events-auto w-[min(90vw,460px)] overflow-hidden rounded-2xl shadow-2xl shadow-black/60"
+          className="glass app-popover pointer-events-auto w-[min(90vw,460px)] overflow-hidden rounded-2xl shadow-2xl"
           onClick={(e) => e.stopPropagation()}
         >
           {/* 顶部高光 */}
@@ -392,13 +393,6 @@ function ProviderModal({
 
           {/* 底部操作栏 */}
           <div className="flex items-center justify-end gap-2.5 border-t border-white/[0.08] px-6 py-4">
-            <button
-              type="button"
-              onClick={onClose}
-              className="glass glass-button glass-control rounded-xl px-4 py-1.5 text-sm"
-            >
-              取消
-            </button>
             <button
               type="button"
               onClick={() => { onSave(form); onClose(); }}

@@ -21,6 +21,39 @@ type TauriAppWindow = typeof import('@tauri-apps/api/window').appWindow;
 /** 导航列宽度 */
 const SIDEBAR_COL = 'w-[52px]';
 
+function MyToolBoxLogo() {
+	return (
+		<svg viewBox="0 0 32 32" className="h-7 w-7" fill="none" aria-hidden="true">
+			<defs>
+				<linearGradient id="mytoolbox-logo-bg" x1="5" y1="4" x2="28" y2="29" gradientUnits="userSpaceOnUse">
+					<stop stopColor="#0B1228" />
+					<stop offset="0.55" stopColor="#124A5F" />
+					<stop offset="1" stopColor="#18B59F" />
+				</linearGradient>
+				<linearGradient id="mytoolbox-logo-box" x1="9" y1="10" x2="24" y2="25" gradientUnits="userSpaceOnUse">
+					<stop stopColor="#DFFCF6" />
+					<stop offset="1" stopColor="#5EEAD4" />
+				</linearGradient>
+			</defs>
+			<rect x="2.5" y="2.5" width="27" height="27" rx="8" fill="url(#mytoolbox-logo-bg)" />
+			<rect x="3.25" y="3.25" width="25.5" height="25.5" rx="7.25" stroke="white" strokeOpacity="0.2" strokeWidth="1.5" />
+			<path
+				d="M11.5 12.5V11c0-1.2.95-2.15 2.15-2.15h4.7c1.2 0 2.15.95 2.15 2.15v1.5"
+				stroke="#B7FFF1"
+				strokeWidth="2.1"
+				strokeLinecap="round"
+			/>
+			<path
+				d="M8.7 14.25h14.6c1.05 0 1.9.85 1.9 1.9v8.05H6.8v-8.05c0-1.05.85-1.9 1.9-1.9Z"
+				fill="url(#mytoolbox-logo-box)"
+			/>
+			<path d="M6.8 18.65h18.4" stroke="#0B3144" strokeOpacity="0.45" strokeWidth="1.7" />
+			<rect x="14.1" y="17.3" width="3.8" height="3.8" rx="1.1" fill="#F8D66B" />
+			<path d="M8.8 23.95h14.4" stroke="white" strokeOpacity="0.35" strokeWidth="1.2" strokeLinecap="round" />
+		</svg>
+	);
+}
+
 export function AppShell() {
 	const [active, setActive] = useState<ViewId>('remote');
 	const [themeOpen, setThemeOpen] = useState(false);
@@ -60,23 +93,16 @@ export function AppShell() {
 			>
 				<div className="pointer-events-none absolute inset-x-0 bottom-0 h-px bg-gradient-to-r from-transparent via-white/[0.06] to-transparent" />
 
-				{/* 左：环形 Logo + 品牌名 */}
+				{/* 左：Logo + 品牌名 */}
 				<div className="flex shrink-0 items-center gap-2.5">
 					<motion.div
-						animate={{ rotate: [0, 5, -3, 0], scale: [1, 1.06, 0.97, 1] }}
-						transition={{ duration: 5, repeat: Infinity, ease: 'easeInOut' }}
-						style={{ color: 'rgb(var(--accent-rgb))' }}
+						animate={{ y: [0, -1, 0], scale: [1, 1.03, 1] }}
+						transition={{ duration: 4.8, repeat: Infinity, ease: 'easeInOut' }}
+						className="drop-shadow-[0_0_18px_rgb(var(--accent-rgb)/0.28)]"
 					>
-						<svg viewBox="0 0 24 24" className="h-6 w-6" fill="none" stroke="currentColor">
-							<circle cx="12" cy="12" r="9" strokeWidth="1.4" />
-							<circle cx="12" cy="12" r="2.8" fill="currentColor" stroke="none" />
-							<line x1="12" y1="3" x2="12" y2="6.5" strokeWidth="1.4" strokeLinecap="round" />
-							<line x1="12" y1="17.5" x2="12" y2="21" strokeWidth="1.4" strokeLinecap="round" />
-							<line x1="3" y1="12" x2="6.5" y2="12" strokeWidth="1.4" strokeLinecap="round" />
-							<line x1="17.5" y1="12" x2="21" y2="12" strokeWidth="1.4" strokeLinecap="round" />
-						</svg>
+						<MyToolBoxLogo />
 					</motion.div>
-					<span className="text-sm font-semibold tracking-tight text-white">Vector Vision</span>
+					<span className="text-sm font-semibold text-white">MyToolBox</span>
 				</div>
 
 				{/* 中：搜索条 */}

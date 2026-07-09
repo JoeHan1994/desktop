@@ -1,0 +1,25 @@
+{
+	"profiles": [
+		{
+			"label": "Production Windows Host",
+			"host": "192.168.1.50",
+			"username": "administrator",
+			"password": "REPLACE_WITH_PASSWORD"
+		},
+		{
+			"label": "Linux Build Server",
+			"host": "build-server.local",
+			"username": "deploy",
+			"password": "REPLACE_WITH_PASSWORD"
+		}
+	],
+	"hypervVmCredentials": [
+		{
+			"parentProfileId": "administrator@192.168.1.50:22",
+			"vmName": "Win11-Dev",
+			"host": "192.168.1.60",
+			"username": "Administrator",
+			"password": "REPLACE_WITH_VM_PASSWORD"
+		}
+	]
+}

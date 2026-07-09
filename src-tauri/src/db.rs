@@ -22,7 +22,8 @@ impl DbState {
         conn.execute_batch("PRAGMA journal_mode=WAL;")?;
 
         // ── 表结构迁移 ──────────────────────────────────────────────
-        conn.execute_batch("
+        conn.execute_batch(
+            "
             CREATE TABLE IF NOT EXISTS model_providers (
                 id           TEXT PRIMARY KEY,
                 name         TEXT NOT NULL,
@@ -39,7 +40,8 @@ impl DbState {
                 value      TEXT NOT NULL,
                 updated_at TEXT NOT NULL DEFAULT (datetime('now'))
             );
-        ")?;
+        ",
+        )?;
 
         Ok(DbState {
             conn: Arc::new(Mutex::new(conn)),

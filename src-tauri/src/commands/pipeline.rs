@@ -70,11 +70,7 @@ pub async fn start_pipeline(
 
 // ── Pipeline 实现 ─────────────────────────────────────────────────────────
 
-fn run_pipeline(
-    paths: Vec<String>,
-    inner: Arc<Mutex<AppStateInner>>,
-    window: tauri::Window,
-) {
+fn run_pipeline(paths: Vec<String>, inner: Arc<Mutex<AppStateInner>>, window: tauri::Window) {
     // ── 重置状态 ─────────────────────────────────────────────────────
     {
         let mut g = inner.lock().unwrap();
@@ -112,8 +108,10 @@ fn run_pipeline(
             .and_then(|bytes| decode_utf8_text_file(path, bytes))
         {
             Ok(content) => {
-                total_bytes +=
-                    path.metadata().map(|m| m.len()).unwrap_or(content.len() as u64);
+                total_bytes += path
+                    .metadata()
+                    .map(|m| m.len())
+                    .unwrap_or(content.len() as u64);
                 raw_contents.push((path_str.clone(), content));
             }
             Err(e) => eprintln!("[pipeline] skip {path_str}: {e}"),
@@ -205,8 +203,10 @@ fn run_pipeline(
     {
         let mut g = inner.lock().unwrap();
         if let Some(first) = g.vectors.first() {
-            let sample: Vec<String> =
-                first.embedding[..6].iter().map(|x| format!("{:.4}", x)).collect();
+            let sample: Vec<String> = first.embedding[..6]
+                .iter()
+                .map(|x| format!("{:.4}", x))
+                .collect();
             g.stats.sample_vector = format!("[{}, …]", sample.join(", "));
         }
         if let Some(last) = g.vectors.last() {
