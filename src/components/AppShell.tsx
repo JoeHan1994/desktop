@@ -36,7 +36,16 @@ function MyToolBoxLogo() {
 				</linearGradient>
 			</defs>
 			<rect x="2.5" y="2.5" width="27" height="27" rx="8" fill="url(#mytoolbox-logo-bg)" />
-			<rect x="3.25" y="3.25" width="25.5" height="25.5" rx="7.25" stroke="white" strokeOpacity="0.2" strokeWidth="1.5" />
+			<rect
+				x="3.25"
+				y="3.25"
+				width="25.5"
+				height="25.5"
+				rx="7.25"
+				stroke="white"
+				strokeOpacity="0.2"
+				strokeWidth="1.5"
+			/>
 			<path
 				d="M11.5 12.5V11c0-1.2.95-2.15 2.15-2.15h4.7c1.2 0 2.15.95 2.15 2.15v1.5"
 				stroke="#B7FFF1"

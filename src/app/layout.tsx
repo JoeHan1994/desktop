@@ -6,8 +6,8 @@ import { ModelProvidersProvider } from '@/features/models/ModelProvidersContext'
 import { ErrorBoundary } from '@/components/ErrorBoundary';
 
 export const metadata: Metadata = {
-  title: 'MyToolBox',
-  description: 'MyToolBox desktop workspace',
+	title: 'MyToolBox',
+	description: 'MyToolBox desktop workspace',
 };
 
 const criticalFallbackCss = String.raw`

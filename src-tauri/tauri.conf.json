@@ -1,58 +1,52 @@
 {
-  "$schema": "https://schema.tauri.app/config/1",
-  "build": {
-    "beforeDevCommand": "npm run dev",
-    "beforeBuildCommand": "npm run build",
-    "devPath": "http://localhost:3000",
-    "distDir": "../out"
-  },
-  "package": {
-    "productName": "MyToolBox",
-    "version": "0.1.0"
-  },
-  "tauri": {
-    "allowlist": {
-      "all": false,
-      "shell": {
-        "all": false,
-        "open": true
-      },
-      "window": {
-        "all": false,
-        "startDragging": true,
-        "minimize": true,
-        "maximize": true,
-        "unmaximize": true,
-        "close": true
-      }
-    },
-    "windows": [
-      {
-        "title": "MyToolBox",
-        "width": 1280,
-        "height": 800,
-        "minWidth": 1380,
-        "minHeight": 780,
-        "resizable": true,
-        "fullscreen": false,
-        "transparent": false,
-        "decorations": false
-      }
-    ],
-    "security": {
-      "csp": null
-    },
-    "bundle": {
-      "active": true,
-      "targets": "all",
-      "identifier": "com.mytoolbox.app",
-      "icon": [
-        "icons/32x32.png",
-        "icons/128x128.png",
-        "icons/128x128@2x.png",
-        "icons/icon.icns",
-        "icons/icon.ico"
-      ]
-    }
-  }
+	"$schema": "https://schema.tauri.app/config/1",
+	"build": {
+		"beforeDevCommand": "npm run dev",
+		"beforeBuildCommand": "npm run build",
+		"devPath": "http://localhost:3000",
+		"distDir": "../out"
+	},
+	"package": {
+		"productName": "MyToolBox",
+		"version": "0.1.0"
+	},
+	"tauri": {
+		"allowlist": {
+			"all": false,
+			"shell": {
+				"all": false,
+				"open": true
+			},
+			"window": {
+				"all": false,
+				"startDragging": true,
+				"minimize": true,
+				"maximize": true,
+				"unmaximize": true,
+				"close": true
+			}
+		},
+		"windows": [
+			{
+				"title": "MyToolBox",
+				"width": 1280,
+				"height": 800,
+				"minWidth": 1380,
+				"minHeight": 780,
+				"resizable": true,
+				"fullscreen": false,
+				"transparent": false,
+				"decorations": false
+			}
+		],
+		"security": {
+			"csp": null
+		},
+		"bundle": {
+			"active": true,
+			"targets": "all",
+			"identifier": "com.mytoolbox.app",
+			"icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.icns", "icons/icon.ico"]
+		}
+	}
 }
