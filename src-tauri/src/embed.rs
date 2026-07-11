@@ -4,6 +4,10 @@
 //! 同一文本始终产生同一向量（可重现），cosine 相似度搜索结构完整可用。
 //!
 //! 替换真实 Embedding 模型只需重写 `embed` 函数，其余代码无需修改。
+//!
+//! # 哈希
+//! `fnv1a` 是项目内唯一的 FNV-1a 实现，供 `embed` 和 `pipeline` 模块共享，
+//! 避免重复定义。
 
 /// 向量维度（对齐 bge-large-zh-v1.5）
 pub const DIM: usize = 768;
@@ -31,7 +35,10 @@ impl Lcg {
 
 // ── FNV-1a 哈希（零外部依赖）────────────────────────────────────────────
 
-fn fnv1a(s: &str) -> u64 {
+/// FNV-1a 64-bit 哈希。
+///
+/// 零外部依赖，`pub(crate)` 导出供 `pipeline` 模块复用，避免重复定义。
+pub(crate) fn fnv1a(s: &str) -> u64 {
     let mut h: u64 = 14_695_981_039_346_656_037;
     for b in s.bytes() {
         h ^= b as u64;

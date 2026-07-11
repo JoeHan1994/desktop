@@ -1,71 +1,52 @@
-//! MySQL-backed remote machine profile commands.
+//! Remote machine profile and Hyper-V VM credential commands.
+//!
+//! 命令层是薄包装层；数据访问逻辑封装在私有 repository 函数中。
+//! Legacy 迁移逻辑复用同一个辅助函数 `run_legacy_import`，消除重复。
 
-use crate::db::DbState;
-use crate::mysql_profiles::{
-    ensure_hyperv_vm_credentials_schema, ensure_schema, MySqlProfileState,
-};
 use chrono::{DateTime, Utc};
 use mysql::prelude::Queryable;
 use mysql::{Pool, Row};
-use rusqlite::{params, OptionalExtension};
-use serde::{Deserialize, Serialize};
 
-const LEGACY_PROFILES_SETTING_KEY: &str = "remote.machine.profiles.v1";
-const LEGACY_IMPORT_FLAG_KEY: &str = "remote.machine.profiles.mysql.imported.v1";
-const LEGACY_VM_CREDENTIALS_SETTING_KEY: &str = "remote.hyperv.vm.credentials.v1";
-const LEGACY_VM_CREDENTIALS_IMPORT_FLAG_KEY: &str =
-    "remote.hyperv.vm.credentials.mysql.imported.v1";
-const MAX_REMOTE_PROFILES: i64 = 12;
-const MAX_VM_CREDENTIALS: i64 = 80;
+use crate::db::DbState;
+use crate::domain::remote_profile::{HyperVVmCredentialProfile, RemoteMachineProfile};
+use crate::error::{AppError, Result as AppResult};
+use crate::mysql_profiles::{
+    ensure_hyperv_vm_credentials_schema, ensure_schema, MySqlProfileState,
+};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RemoteMachineProfile {
-    pub id: String,
-    pub label: String,
-    pub host: String,
-    pub port: String,
-    pub rdp_port: Option<String>,
-    pub username: String,
-    pub password: String,
-    pub last_connected_at: String,
-}
+// ── Constants ─────────────────────────────────────────────────────────────
 
-#[derive(Deserialize)]
+const LEGACY_PROFILES_KEY: &str      = "remote.machine.profiles.v1";
+const LEGACY_PROFILES_FLAG: &str     = "remote.machine.profiles.mysql.imported.v1";
+const LEGACY_VM_CREDS_KEY: &str      = "remote.hyperv.vm.credentials.v1";
+const LEGACY_VM_CREDS_FLAG: &str     = "remote.hyperv.vm.credentials.mysql.imported.v1";
+const MAX_REMOTE_PROFILES: i64       = 12;
+const MAX_VM_CREDENTIALS: i64        = 80;
+
+// ── Request DTOs ──────────────────────────────────────────────────────────
+
+#[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpsertRemoteMachineProfileRequest {
     pub profile: RemoteMachineProfile,
     pub previous_profile_id: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct HyperVVmCredentialProfile {
-    pub id: String,
-    pub label: String,
-    pub host: String,
-    pub port: String,
-    pub username: String,
-    pub password: String,
-    pub parent_profile_id: String,
-    pub vm_id: String,
-    pub vm_name: String,
-    pub last_connected_at: String,
-}
-
-#[derive(Deserialize)]
+#[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpsertHyperVVmCredentialRequest {
     pub credential: HyperVVmCredentialProfile,
 }
 
+// ── Remote Machine Profile Commands ──────────────────────────────────────
+
 #[tauri::command]
 pub fn list_remote_machine_profiles(
     mysql: tauri::State<'_, MySqlProfileState>,
 ) -> Result<Vec<RemoteMachineProfile>, String> {
-    let pool = mysql.require_pool()?;
-    ensure_schema(pool)?;
-    list_profiles(pool, &mysql)
+    let pool = mysql.require_pool().map_err(|e| e.to_string())?;
+    ensure_schema(pool).map_err(|e| e.to_string())?;
+    ProfileRepo::new(pool, &mysql).list().map_err(Into::into)
 }
 
 #[tauri::command]
@@ -73,20 +54,18 @@ pub fn upsert_remote_machine_profile(
     mysql: tauri::State<'_, MySqlProfileState>,
     request: UpsertRemoteMachineProfileRequest,
 ) -> Result<Vec<RemoteMachineProfile>, String> {
-    let pool = mysql.require_pool()?;
-    ensure_schema(pool)?;
-    ensure_host_available(
-        pool,
-        &request.profile,
-        request.previous_profile_id.as_deref(),
-    )?;
-    if let Some(previous_id) = request.previous_profile_id.as_deref() {
-        if previous_id != request.profile.id {
-            delete_profile(pool, previous_id)?;
+    let pool = mysql.require_pool().map_err(|e| e.to_string())?;
+    ensure_schema(pool).map_err(|e| e.to_string())?;
+    let repo = ProfileRepo::new(pool, &mysql);
+    repo.ensure_host_available(&request.profile, request.previous_profile_id.as_deref())
+        .map_err(|e| e.to_string())?;
+    if let Some(prev_id) = request.previous_profile_id.as_deref() {
+        if prev_id != request.profile.id {
+            repo.delete(prev_id).map_err(|e| e.to_string())?;
         }
     }
-    upsert_profile(pool, &mysql, &request.profile)?;
-    list_profiles(pool, &mysql)
+    repo.upsert(&request.profile).map_err(|e| e.to_string())?;
+    repo.list().map_err(Into::into)
 }
 
 #[tauri::command]
@@ -94,10 +73,11 @@ pub fn delete_remote_machine_profile(
     mysql: tauri::State<'_, MySqlProfileState>,
     id: String,
 ) -> Result<Vec<RemoteMachineProfile>, String> {
-    let pool = mysql.require_pool()?;
-    ensure_schema(pool)?;
-    delete_profile(pool, &id)?;
-    list_profiles(pool, &mysql)
+    let pool = mysql.require_pool().map_err(|e| e.to_string())?;
+    ensure_schema(pool).map_err(|e| e.to_string())?;
+    let repo = ProfileRepo::new(pool, &mysql);
+    repo.delete(&id).map_err(|e| e.to_string())?;
+    repo.list().map_err(Into::into)
 }
 
 #[tauri::command]
@@ -105,59 +85,36 @@ pub fn import_legacy_remote_machine_profiles(
     db: tauri::State<'_, DbState>,
     mysql: tauri::State<'_, MySqlProfileState>,
 ) -> Result<Vec<RemoteMachineProfile>, String> {
-    let pool = mysql.require_pool()?;
-    ensure_schema(pool)?;
+    let pool = mysql.require_pool().map_err(|e| e.to_string())?;
+    ensure_schema(pool).map_err(|e| e.to_string())?;
+    let repo = ProfileRepo::new(pool, &mysql);
 
-    let legacy_payload: Option<String> = {
-        let conn = db.conn.lock().map_err(|err| err.to_string())?;
-        let already_imported: Option<String> = conn
-            .query_row(
-                "SELECT value FROM app_settings WHERE key = ?1",
-                params![LEGACY_IMPORT_FLAG_KEY],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(|err| err.to_string())?;
-        if already_imported.as_deref() == Some("1") {
-            return list_profiles(pool, &mysql);
-        }
-        conn.query_row(
-            "SELECT value FROM app_settings WHERE key = ?1",
-            params![LEGACY_PROFILES_SETTING_KEY],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()
-        .map_err(|err| err.to_string())?
-    };
+    run_legacy_import(
+        &db,
+        LEGACY_PROFILES_FLAG,
+        LEGACY_PROFILES_KEY,
+        |raw| {
+            let profiles: Vec<RemoteMachineProfile> = serde_json::from_str(raw).unwrap_or_default();
+            for p in profiles.iter().take(MAX_REMOTE_PROFILES as usize) {
+                repo.upsert(p)?;
+            }
+            Ok(())
+        },
+    )
+    .map_err(|e| e.to_string())?;
 
-    if let Some(raw) = legacy_payload {
-        let profiles: Vec<RemoteMachineProfile> = serde_json::from_str(&raw).unwrap_or_default();
-        for profile in profiles.iter().take(MAX_REMOTE_PROFILES as usize) {
-            upsert_profile(pool, &mysql, profile)?;
-        }
-    }
-
-    {
-        let conn = db.conn.lock().map_err(|err| err.to_string())?;
-        conn.execute(
-            "INSERT INTO app_settings (key, value, updated_at)
-             VALUES (?1, '1', datetime('now'))
-             ON CONFLICT(key) DO UPDATE SET value = '1', updated_at = datetime('now')",
-            params![LEGACY_IMPORT_FLAG_KEY],
-        )
-        .map_err(|err| err.to_string())?;
-    }
-
-    list_profiles(pool, &mysql)
+    repo.list().map_err(Into::into)
 }
+
+// ── Hyper-V VM Credential Commands ────────────────────────────────────────
 
 #[tauri::command]
 pub fn list_hyperv_vm_credentials(
     mysql: tauri::State<'_, MySqlProfileState>,
 ) -> Result<Vec<HyperVVmCredentialProfile>, String> {
-    let pool = mysql.require_pool()?;
-    ensure_hyperv_vm_credentials_schema(pool)?;
-    list_vm_credentials(pool, &mysql)
+    let pool = mysql.require_pool().map_err(|e| e.to_string())?;
+    ensure_hyperv_vm_credentials_schema(pool).map_err(|e| e.to_string())?;
+    VmCredRepo::new(pool, &mysql).list().map_err(Into::into)
 }
 
 #[tauri::command]
@@ -165,10 +122,11 @@ pub fn upsert_hyperv_vm_credential(
     mysql: tauri::State<'_, MySqlProfileState>,
     request: UpsertHyperVVmCredentialRequest,
 ) -> Result<Vec<HyperVVmCredentialProfile>, String> {
-    let pool = mysql.require_pool()?;
-    ensure_hyperv_vm_credentials_schema(pool)?;
-    upsert_vm_credential(pool, &mysql, &request.credential)?;
-    list_vm_credentials(pool, &mysql)
+    let pool = mysql.require_pool().map_err(|e| e.to_string())?;
+    ensure_hyperv_vm_credentials_schema(pool).map_err(|e| e.to_string())?;
+    let repo = VmCredRepo::new(pool, &mysql);
+    repo.upsert(&request.credential).map_err(|e| e.to_string())?;
+    repo.list().map_err(Into::into)
 }
 
 #[tauri::command]
@@ -176,10 +134,11 @@ pub fn delete_hyperv_vm_credential(
     mysql: tauri::State<'_, MySqlProfileState>,
     id: String,
 ) -> Result<Vec<HyperVVmCredentialProfile>, String> {
-    let pool = mysql.require_pool()?;
-    ensure_hyperv_vm_credentials_schema(pool)?;
-    delete_vm_credential(pool, &id)?;
-    list_vm_credentials(pool, &mysql)
+    let pool = mysql.require_pool().map_err(|e| e.to_string())?;
+    ensure_hyperv_vm_credentials_schema(pool).map_err(|e| e.to_string())?;
+    let repo = VmCredRepo::new(pool, &mysql);
+    repo.delete(&id).map_err(|e| e.to_string())?;
+    repo.list().map_err(Into::into)
 }
 
 #[tauri::command]
@@ -187,10 +146,11 @@ pub fn delete_hyperv_vm_credentials_by_parent_profile_id(
     mysql: tauri::State<'_, MySqlProfileState>,
     parent_profile_id: String,
 ) -> Result<Vec<HyperVVmCredentialProfile>, String> {
-    let pool = mysql.require_pool()?;
-    ensure_hyperv_vm_credentials_schema(pool)?;
-    delete_vm_credentials_by_parent_profile_id(pool, &parent_profile_id)?;
-    list_vm_credentials(pool, &mysql)
+    let pool = mysql.require_pool().map_err(|e| e.to_string())?;
+    ensure_hyperv_vm_credentials_schema(pool).map_err(|e| e.to_string())?;
+    let repo = VmCredRepo::new(pool, &mysql);
+    repo.delete_by_parent(&parent_profile_id).map_err(|e| e.to_string())?;
+    repo.list().map_err(Into::into)
 }
 
 #[tauri::command]
@@ -198,448 +158,277 @@ pub fn import_legacy_hyperv_vm_credentials(
     db: tauri::State<'_, DbState>,
     mysql: tauri::State<'_, MySqlProfileState>,
 ) -> Result<Vec<HyperVVmCredentialProfile>, String> {
-    let pool = mysql.require_pool()?;
-    ensure_hyperv_vm_credentials_schema(pool)?;
+    let pool = mysql.require_pool().map_err(|e| e.to_string())?;
+    ensure_hyperv_vm_credentials_schema(pool).map_err(|e| e.to_string())?;
+    let repo = VmCredRepo::new(pool, &mysql);
 
-    let legacy_payload: Option<String> = {
-        let conn = db.conn.lock().map_err(|err| err.to_string())?;
-        let already_imported: Option<String> = conn
-            .query_row(
-                "SELECT value FROM app_settings WHERE key = ?1",
-                params![LEGACY_VM_CREDENTIALS_IMPORT_FLAG_KEY],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(|err| err.to_string())?;
-        if already_imported.as_deref() == Some("1") {
-            return list_vm_credentials(pool, &mysql);
-        }
-        conn.query_row(
-            "SELECT value FROM app_settings WHERE key = ?1",
-            params![LEGACY_VM_CREDENTIALS_SETTING_KEY],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()
-        .map_err(|err| err.to_string())?
-    };
+    run_legacy_import(
+        &db,
+        LEGACY_VM_CREDS_FLAG,
+        LEGACY_VM_CREDS_KEY,
+        |raw| {
+            let creds: Vec<HyperVVmCredentialProfile> =
+                serde_json::from_str(raw).unwrap_or_default();
+            for c in creds.iter().take(MAX_VM_CREDENTIALS as usize) {
+                repo.upsert(c)?;
+            }
+            Ok(())
+        },
+    )
+    .map_err(|e| e.to_string())?;
 
-    if let Some(raw) = legacy_payload {
-        let credentials: Vec<HyperVVmCredentialProfile> =
-            serde_json::from_str(&raw).unwrap_or_default();
-        for credential in credentials.iter().take(MAX_VM_CREDENTIALS as usize) {
-            upsert_vm_credential(pool, &mysql, credential)?;
-        }
-    }
-
-    {
-        let conn = db.conn.lock().map_err(|err| err.to_string())?;
-        conn.execute(
-            "INSERT INTO app_settings (key, value, updated_at)
-             VALUES (?1, '1', datetime('now'))
-             ON CONFLICT(key) DO UPDATE SET value = '1', updated_at = datetime('now')",
-            params![LEGACY_VM_CREDENTIALS_IMPORT_FLAG_KEY],
-        )
-        .map_err(|err| err.to_string())?;
-    }
-
-    list_vm_credentials(pool, &mysql)
+    repo.list().map_err(Into::into)
 }
 
-fn list_profiles(
-    pool: &Pool,
-    mysql: &MySqlProfileState,
-) -> Result<Vec<RemoteMachineProfile>, String> {
-    let mut conn = pool
-        .get_conn()
-        .map_err(|err| format!("连接 MySQL 失败：{}", err))?;
-    let rows: Vec<Row> = conn
-        .exec(
-            r#"
-            SELECT
-                id,
-                label,
-                host,
-                ssh_port,
-                rdp_port,
-                username,
-                COALESCE(password_ciphertext, '') AS password_ciphertext,
-                COALESCE(password_nonce, '') AS password_nonce,
-                COALESCE(DATE_FORMAT(last_connected_at, '%Y-%m-%dT%H:%i:%s.000Z'), '') AS last_connected_at
-            FROM remote_machine_profiles
-            ORDER BY last_connected_at IS NULL, last_connected_at DESC, updated_at DESC
-            LIMIT ?
-            "#,
-            (MAX_REMOTE_PROFILES,),
-        )
-        .map_err(|err| format!("读取 MySQL 远程机器列表失败：{}", err))?;
+// ── Legacy import helper (DRY) ────────────────────────────────────────────
 
-    rows.into_iter()
-        .map(|row| {
-            let (
-                id,
-                label,
-                host,
-                ssh_port,
-                rdp_port,
-                username,
-                password_ciphertext,
-                password_nonce,
-                last_connected_at,
-            ): (
-                String,
-                String,
-                String,
-                u16,
-                u16,
-                String,
-                String,
-                String,
-                String,
-            ) = mysql::from_row_opt(row).map_err(|err| err.to_string())?;
-            let password =
-                mysql.decrypt_password(password_ciphertext.as_str(), password_nonce.as_str())?;
-            Ok(RemoteMachineProfile {
-                id,
-                label,
-                host,
-                port: ssh_port.to_string(),
-                rdp_port: Some(rdp_port.to_string()),
-                username,
-                password,
-                last_connected_at,
-            })
-        })
-        .collect::<Result<Vec<_>, String>>()
-}
-
-fn ensure_host_available(
-    pool: &Pool,
-    profile: &RemoteMachineProfile,
-    previous_profile_id: Option<&str>,
-) -> Result<(), String> {
-    let host = profile.host.trim();
-    if host.is_empty() {
+/// Check the `flag_key` setting; if not set, read `data_key` and call `import_fn`.
+/// After `import_fn` succeeds, mark the flag as done.
+fn run_legacy_import(
+    db: &DbState,
+    flag_key: &str,
+    data_key: &str,
+    import_fn: impl FnOnce(&str) -> AppResult<()>,
+) -> AppResult<()> {
+    if db.get_setting(flag_key)?.as_deref() == Some("1") {
         return Ok(());
     }
+    if let Some(raw) = db.get_setting(data_key)? {
+        import_fn(&raw)?;
+    }
+    db.set_setting(flag_key, "1")?;
+    Ok(())
+}
 
-    let current_id = profile.id.trim();
-    let previous_id = previous_profile_id.map(str::trim).unwrap_or_default();
-    let mut conn = pool
-        .get_conn()
-        .map_err(|err| format!("连接 MySQL 失败：{}", err))?;
-    let rows: Vec<Row> = conn
-        .exec(
-            r#"
-            SELECT
-                id,
-                label,
-                host,
-                ssh_port,
-                username
-            FROM remote_machine_profiles
-            WHERE host = ?
-            ORDER BY updated_at DESC
-            LIMIT 8
-            "#,
-            (host,),
-        )
-        .map_err(|err| format!("检查 MySQL 远程机器宿主机重复失败：{}", err))?;
+// ── RemoteMachineProfile repository ──────────────────────────────────────
 
-    for row in rows {
-        let (id, label, existing_host, ssh_port, username): (String, String, String, u16, String) =
-            mysql::from_row_opt(row)
-                .map_err(|err| format!("解析 MySQL 远程机器宿主机重复检查结果失败：{}", err))?;
-        if id == current_id || (!previous_id.is_empty() && id == previous_id) {
-            continue;
-        }
+struct ProfileRepo<'a> {
+    pool: &'a Pool,
+    state: &'a MySqlProfileState,
+}
 
-        let name = if label.trim().is_empty() {
-            format!("{}@{}:{}", username, existing_host, ssh_port)
-        } else {
-            label.trim().to_string()
-        };
-        return Err(format!(
-            "已存在这台宿主机：{}（{}:{} / {}）",
-            name, existing_host, ssh_port, username
-        ));
+impl<'a> ProfileRepo<'a> {
+    fn new(pool: &'a Pool, state: &'a MySqlProfileState) -> Self {
+        Self { pool, state }
     }
 
-    Ok(())
-}
-
-fn upsert_profile(
-    pool: &Pool,
-    mysql: &MySqlProfileState,
-    profile: &RemoteMachineProfile,
-) -> Result<(), String> {
-    let id = profile.id.trim();
-    let label = profile.label.trim();
-    let host = profile.host.trim();
-    let username = profile.username.trim();
-    if id.is_empty() || host.is_empty() || username.is_empty() {
-        return Err("远程机器配置缺少 id、host 或 username".to_string());
-    }
-    let ssh_port = parse_port(&profile.port, 22)?;
-    let rdp_port = parse_port(profile.rdp_port.as_deref().unwrap_or("3389"), 3389)?;
-    let last_connected_at = mysql_datetime(&profile.last_connected_at);
-    let (password_ciphertext, password_nonce) = mysql.encrypt_password(&profile.password)?;
-    let password_ciphertext = if password_ciphertext.is_empty() {
-        None
-    } else {
-        Some(password_ciphertext)
-    };
-    let password_nonce = if password_nonce.is_empty() {
-        None
-    } else {
-        Some(password_nonce)
-    };
-
-    let mut conn = pool
-        .get_conn()
-        .map_err(|err| format!("连接 MySQL 失败：{}", err))?;
-    conn.exec_drop(
-        r#"
-        INSERT INTO remote_machine_profiles (
-            id,
-            label,
-            host,
-            ssh_port,
-            rdp_port,
-            username,
-            password_ciphertext,
-            password_nonce,
-            last_connected_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON DUPLICATE KEY UPDATE
-            id = VALUES(id),
-            label = VALUES(label),
-            host = VALUES(host),
-            ssh_port = VALUES(ssh_port),
-            rdp_port = VALUES(rdp_port),
-            username = VALUES(username),
-            password_ciphertext = VALUES(password_ciphertext),
-            password_nonce = VALUES(password_nonce),
-            last_connected_at = VALUES(last_connected_at)
-        "#,
-        (
-            id,
-            if label.is_empty() { id } else { label },
-            host,
-            ssh_port,
-            rdp_port,
-            username,
-            password_ciphertext,
-            password_nonce,
-            last_connected_at,
-        ),
-    )
-    .map_err(|err| format!("保存 MySQL 远程机器配置失败：{}", err))?;
-
-    Ok(())
-}
-
-fn delete_profile(pool: &Pool, id: &str) -> Result<(), String> {
-    let mut conn = pool
-        .get_conn()
-        .map_err(|err| format!("连接 MySQL 失败：{}", err))?;
-    conn.exec_drop("DELETE FROM remote_machine_profiles WHERE id = ?", (id,))
-        .map_err(|err| format!("删除 MySQL 远程机器配置失败：{}", err))?;
-    Ok(())
-}
-
-fn list_vm_credentials(
-    pool: &Pool,
-    mysql: &MySqlProfileState,
-) -> Result<Vec<HyperVVmCredentialProfile>, String> {
-    let mut conn = pool
-        .get_conn()
-        .map_err(|err| format!("连接 MySQL 失败：{}", err))?;
-    let rows: Vec<Row> = conn
-        .exec(
-            r#"
-            SELECT
-                id,
-                label,
-                host,
-                ssh_port,
-                username,
-                COALESCE(password_ciphertext, '') AS password_ciphertext,
-                COALESCE(password_nonce, '') AS password_nonce,
-                parent_profile_id,
-                vm_id,
-                vm_name,
-                COALESCE(DATE_FORMAT(last_connected_at, '%Y-%m-%dT%H:%i:%s.000Z'), '') AS last_connected_at
-            FROM hyperv_vm_credentials
-            ORDER BY last_connected_at IS NULL, last_connected_at DESC, updated_at DESC
-            LIMIT ?
-            "#,
-            (MAX_VM_CREDENTIALS,),
-        )
-        .map_err(|err| format!("读取 MySQL Hyper-V VM 凭据失败：{}", err))?;
-
-    rows.into_iter()
-        .map(|row| {
-            let (
-                id,
-                label,
-                host,
-                ssh_port,
-                username,
-                password_ciphertext,
-                password_nonce,
-                parent_profile_id,
-                vm_id,
-                vm_name,
-                last_connected_at,
-            ): (
-                String,
-                String,
-                String,
-                u16,
-                String,
-                String,
-                String,
-                String,
-                String,
-                String,
-                String,
-            ) = mysql::from_row_opt(row).map_err(|err| err.to_string())?;
-            let password =
-                mysql.decrypt_vm_password(password_ciphertext.as_str(), password_nonce.as_str())?;
-            Ok(HyperVVmCredentialProfile {
-                id,
-                label,
-                host,
-                port: ssh_port.to_string(),
-                username,
-                password,
-                parent_profile_id,
-                vm_id,
-                vm_name,
-                last_connected_at,
+    fn list(&self) -> AppResult<Vec<RemoteMachineProfile>> {
+        let mut conn = self.pool.get_conn()?;
+        let rows: Vec<Row> = conn.exec(
+            r#"SELECT id, label, host, ssh_port, rdp_port, username,
+                      COALESCE(password_ciphertext, '') AS password_ciphertext,
+                      COALESCE(password_nonce, '')      AS password_nonce,
+                      COALESCE(DATE_FORMAT(last_connected_at, '%Y-%m-%dT%H:%i:%s.000Z'), '') AS last_connected_at
+               FROM remote_machine_profiles
+               ORDER BY last_connected_at IS NULL, last_connected_at DESC, updated_at DESC
+               LIMIT ?"#,
+            (MAX_REMOTE_PROFILES,),
+        )?;
+        rows.into_iter()
+            .map(|row| {
+                let (id, label, host, ssh_port, rdp_port, username, ct, nonce, lca): (
+                    String, String, String, u16, u16, String, String, String, String,
+                ) = mysql::from_row_opt(row)?;
+                let password = self.state.decrypt_password(&ct, &nonce)?;
+                Ok(RemoteMachineProfile {
+                    id, label, host,
+                    port: ssh_port.to_string(),
+                    rdp_port: Some(rdp_port.to_string()),
+                    username, password,
+                    last_connected_at: lca,
+                })
             })
-        })
-        .collect::<Result<Vec<_>, String>>()
-}
-
-fn upsert_vm_credential(
-    pool: &Pool,
-    mysql: &MySqlProfileState,
-    credential: &HyperVVmCredentialProfile,
-) -> Result<(), String> {
-    let id = credential.id.trim();
-    let parent_profile_id = credential.parent_profile_id.trim();
-    let vm_id = credential.vm_id.trim();
-    let username = credential.username.trim();
-    if id.is_empty() || parent_profile_id.is_empty() || vm_id.is_empty() || username.is_empty() {
-        return Err("Hyper-V VM 凭据缺少 id、parentProfileId、vmId 或 username".to_string());
+            .collect()
     }
-    let label = credential.label.trim();
-    let host = credential.host.trim();
-    let vm_name = credential.vm_name.trim();
-    let ssh_port = parse_port(&credential.port, 22)?;
-    let last_connected_at = mysql_datetime(&credential.last_connected_at);
-    let (password_ciphertext, password_nonce) = mysql.encrypt_vm_password(&credential.password)?;
-    let password_ciphertext = if password_ciphertext.is_empty() {
-        None
-    } else {
-        Some(password_ciphertext)
-    };
-    let password_nonce = if password_nonce.is_empty() {
-        None
-    } else {
-        Some(password_nonce)
-    };
 
-    let mut conn = pool
-        .get_conn()
-        .map_err(|err| format!("连接 MySQL 失败：{}", err))?;
-    conn.exec_drop(
-        r#"
-        INSERT INTO hyperv_vm_credentials (
-            id,
-            label,
-            host,
-            ssh_port,
-            username,
-            password_ciphertext,
-            password_nonce,
-            parent_profile_id,
-            vm_id,
-            vm_name,
-            last_connected_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON DUPLICATE KEY UPDATE
-            id = VALUES(id),
-            label = VALUES(label),
-            host = VALUES(host),
-            ssh_port = VALUES(ssh_port),
-            username = VALUES(username),
-            password_ciphertext = VALUES(password_ciphertext),
-            password_nonce = VALUES(password_nonce),
-            parent_profile_id = VALUES(parent_profile_id),
-            vm_id = VALUES(vm_id),
-            vm_name = VALUES(vm_name),
-            last_connected_at = VALUES(last_connected_at)
-        "#,
-        (
-            id,
-            if label.is_empty() { id } else { label },
-            host,
-            ssh_port,
-            username,
-            password_ciphertext,
-            password_nonce,
-            parent_profile_id,
-            vm_id,
-            if vm_name.is_empty() { vm_id } else { vm_name },
-            last_connected_at,
-        ),
-    )
-    .map_err(|err| format!("保存 MySQL Hyper-V VM 凭据失败：{}", err))?;
+    fn upsert(&self, p: &RemoteMachineProfile) -> AppResult<()> {
+        let id = p.id.trim();
+        let host = p.host.trim();
+        let username = p.username.trim();
+        if id.is_empty() || host.is_empty() || username.is_empty() {
+            return Err(AppError::Validation("远程机器配置缺少 id、host 或 username".into()));
+        }
+        let label = p.label.trim();
+        let ssh_port = parse_port(&p.port, 22)?;
+        let rdp_port = parse_port(p.rdp_port.as_deref().unwrap_or("3389"), 3389)?;
+        let lca = mysql_datetime(&p.last_connected_at);
+        let (ct, nonce) = self.state.encrypt_password(&p.password)?;
+        let ct_opt = if ct.is_empty() { None } else { Some(ct) };
+        let nonce_opt = if nonce.is_empty() { None } else { Some(nonce) };
 
-    Ok(())
+        let mut conn = self.pool.get_conn()?;
+        conn.exec_drop(
+            r#"INSERT INTO remote_machine_profiles
+               (id, label, host, ssh_port, rdp_port, username, password_ciphertext, password_nonce, last_connected_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON DUPLICATE KEY UPDATE
+                   label = VALUES(label), host = VALUES(host), ssh_port = VALUES(ssh_port),
+                   rdp_port = VALUES(rdp_port), username = VALUES(username),
+                   password_ciphertext = VALUES(password_ciphertext),
+                   password_nonce = VALUES(password_nonce),
+                   last_connected_at = VALUES(last_connected_at)"#,
+            (id, if label.is_empty() { id } else { label }, host, ssh_port, rdp_port,
+             username, ct_opt, nonce_opt, lca),
+        )?;
+        Ok(())
+    }
+
+    fn delete(&self, id: &str) -> AppResult<()> {
+        let mut conn = self.pool.get_conn()?;
+        conn.exec_drop("DELETE FROM remote_machine_profiles WHERE id = ?", (id,))?;
+        Ok(())
+    }
+
+    fn ensure_host_available(
+        &self,
+        profile: &RemoteMachineProfile,
+        previous_profile_id: Option<&str>,
+    ) -> AppResult<()> {
+        let host = profile.host.trim();
+        if host.is_empty() {
+            return Ok(());
+        }
+        let current_id = profile.id.trim();
+        let previous_id = previous_profile_id.map(str::trim).unwrap_or_default();
+
+        let mut conn = self.pool.get_conn()?;
+        let rows: Vec<Row> = conn.exec(
+            r#"SELECT id, label, host, ssh_port, username
+               FROM remote_machine_profiles WHERE host = ?
+               ORDER BY updated_at DESC LIMIT 8"#,
+            (host,),
+        )?;
+        for row in rows {
+            let (id, label, existing_host, ssh_port, username): (
+                String, String, String, u16, String,
+            ) = mysql::from_row_opt(row)?;
+            if id == current_id || (!previous_id.is_empty() && id == previous_id) {
+                continue;
+            }
+            let name = if label.trim().is_empty() {
+                format!("{username}@{existing_host}:{ssh_port}")
+            } else {
+                label.trim().to_string()
+            };
+            return Err(AppError::Validation(format!(
+                "已存在这台宿主机：{name}（{existing_host}:{ssh_port} / {username}）"
+            )));
+        }
+        Ok(())
+    }
 }
 
-fn delete_vm_credential(pool: &Pool, id: &str) -> Result<(), String> {
-    let mut conn = pool
-        .get_conn()
-        .map_err(|err| format!("连接 MySQL 失败：{}", err))?;
-    conn.exec_drop("DELETE FROM hyperv_vm_credentials WHERE id = ?", (id,))
-        .map_err(|err| format!("删除 MySQL Hyper-V VM 凭据失败：{}", err))?;
-    Ok(())
+// ── HyperVVmCredential repository ─────────────────────────────────────────
+
+struct VmCredRepo<'a> {
+    pool: &'a Pool,
+    state: &'a MySqlProfileState,
 }
 
-fn delete_vm_credentials_by_parent_profile_id(
-    pool: &Pool,
-    parent_profile_id: &str,
-) -> Result<(), String> {
-    let mut conn = pool
-        .get_conn()
-        .map_err(|err| format!("连接 MySQL 失败：{}", err))?;
-    conn.exec_drop(
-        "DELETE FROM hyperv_vm_credentials WHERE parent_profile_id = ?",
-        (parent_profile_id,),
-    )
-    .map_err(|err| format!("删除 MySQL Hyper-V VM 凭据失败：{}", err))?;
-    Ok(())
+impl<'a> VmCredRepo<'a> {
+    fn new(pool: &'a Pool, state: &'a MySqlProfileState) -> Self {
+        Self { pool, state }
+    }
+
+    fn list(&self) -> AppResult<Vec<HyperVVmCredentialProfile>> {
+        let mut conn = self.pool.get_conn()?;
+        let rows: Vec<Row> = conn.exec(
+            r#"SELECT id, label, host, ssh_port, username,
+                      COALESCE(password_ciphertext, '') AS password_ciphertext,
+                      COALESCE(password_nonce, '')      AS password_nonce,
+                      parent_profile_id, vm_id, vm_name,
+                      COALESCE(DATE_FORMAT(last_connected_at, '%Y-%m-%dT%H:%i:%s.000Z'), '') AS last_connected_at
+               FROM hyperv_vm_credentials
+               ORDER BY last_connected_at IS NULL, last_connected_at DESC, updated_at DESC
+               LIMIT ?"#,
+            (MAX_VM_CREDENTIALS,),
+        )?;
+        rows.into_iter()
+            .map(|row| {
+                let (id, label, host, ssh_port, username, ct, nonce, ppid, vm_id, vm_name, lca): (
+                    String, String, String, u16, String, String, String, String, String, String, String,
+                ) = mysql::from_row_opt(row)?;
+                let password = self.state.decrypt_vm_password(&ct, &nonce)?;
+                Ok(HyperVVmCredentialProfile {
+                    id, label, host,
+                    port: ssh_port.to_string(),
+                    username, password,
+                    parent_profile_id: ppid,
+                    vm_id, vm_name,
+                    last_connected_at: lca,
+                })
+            })
+            .collect()
+    }
+
+    fn upsert(&self, c: &HyperVVmCredentialProfile) -> AppResult<()> {
+        let id = c.id.trim();
+        let parent_profile_id = c.parent_profile_id.trim();
+        let vm_id = c.vm_id.trim();
+        let username = c.username.trim();
+        if id.is_empty() || parent_profile_id.is_empty() || vm_id.is_empty() || username.is_empty() {
+            return Err(AppError::Validation("Hyper-V VM 凭据缺少必要字段".into()));
+        }
+        let label = c.label.trim();
+        let host = c.host.trim();
+        let vm_name = c.vm_name.trim();
+        let ssh_port = parse_port(&c.port, 22)?;
+        let lca = mysql_datetime(&c.last_connected_at);
+        let (ct, nonce) = self.state.encrypt_vm_password(&c.password)?;
+        let ct_opt = if ct.is_empty() { None } else { Some(ct) };
+        let nonce_opt = if nonce.is_empty() { None } else { Some(nonce) };
+
+        let mut conn = self.pool.get_conn()?;
+        conn.exec_drop(
+            r#"INSERT INTO hyperv_vm_credentials
+               (id, label, host, ssh_port, username, password_ciphertext, password_nonce,
+                parent_profile_id, vm_id, vm_name, last_connected_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON DUPLICATE KEY UPDATE
+                   id = VALUES(id), label = VALUES(label), host = VALUES(host),
+                   ssh_port = VALUES(ssh_port), username = VALUES(username),
+                   password_ciphertext = VALUES(password_ciphertext),
+                   password_nonce = VALUES(password_nonce),
+                   parent_profile_id = VALUES(parent_profile_id),
+                   vm_id = VALUES(vm_id), vm_name = VALUES(vm_name),
+                   last_connected_at = VALUES(last_connected_at)"#,
+            (id, if label.is_empty() { id } else { label }, host, ssh_port, username,
+             ct_opt, nonce_opt, parent_profile_id, vm_id,
+             if vm_name.is_empty() { vm_id } else { vm_name }, lca),
+        )?;
+        Ok(())
+    }
+
+    fn delete(&self, id: &str) -> AppResult<()> {
+        let mut conn = self.pool.get_conn()?;
+        conn.exec_drop("DELETE FROM hyperv_vm_credentials WHERE id = ?", (id,))?;
+        Ok(())
+    }
+
+    fn delete_by_parent(&self, parent_profile_id: &str) -> AppResult<()> {
+        let mut conn = self.pool.get_conn()?;
+        conn.exec_drop(
+            "DELETE FROM hyperv_vm_credentials WHERE parent_profile_id = ?",
+            (parent_profile_id,),
+        )?;
+        Ok(())
+    }
 }
 
-fn parse_port(value: &str, default_port: u16) -> Result<u16, String> {
+// ── Utility functions ─────────────────────────────────────────────────────
+
+fn parse_port(value: &str, default_port: u16) -> AppResult<u16> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
         return Ok(default_port);
     }
-    trimmed
+    let port = trimmed
         .parse::<u16>()
-        .map_err(|_| format!("端口无效：{}", trimmed))
-        .and_then(|port| {
-            if port == 0 {
-                Err(format!("端口无效：{}", trimmed))
-            } else {
-                Ok(port)
-            }
-        })
+        .map_err(|_| AppError::Validation(format!("端口无效：{trimmed}")))?;
+    if port == 0 {
+        return Err(AppError::Validation(format!("端口无效：{trimmed}")));
+    }
+    Ok(port)
 }
 
 fn mysql_datetime(value: &str) -> Option<String> {
@@ -648,10 +437,6 @@ fn mysql_datetime(value: &str) -> Option<String> {
         return None;
     }
     DateTime::parse_from_rfc3339(trimmed)
-        .map(|dt| {
-            dt.with_timezone(&Utc)
-                .format("%Y-%m-%d %H:%M:%S%.3f")
-                .to_string()
-        })
+        .map(|dt| dt.with_timezone(&Utc).format("%Y-%m-%d %H:%M:%S%.3f").to_string())
         .ok()
 }
