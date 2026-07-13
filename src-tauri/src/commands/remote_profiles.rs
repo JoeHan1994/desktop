@@ -4,6 +4,7 @@ use crate::db::DbState;
 use crate::mysql_profiles::{
     ensure_hyperv_vm_credentials_schema, ensure_schema, MySqlProfileState,
 };
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use chrono::{DateTime, Utc};
 use mysql::prelude::Queryable;
 use mysql::{Pool, Row};
@@ -57,6 +58,155 @@ pub struct HyperVVmCredentialProfile {
 #[serde(rename_all = "camelCase")]
 pub struct UpsertHyperVVmCredentialRequest {
     pub credential: HyperVVmCredentialProfile,
+}
+
+// ── mysql.toml 用户凭据配置 ────────────────────────────────────────────────
+
+const MYSQL_PASSWORD_PLACEHOLDER: &str = "REPLACE_WITH_MYSQL_PASSWORD";
+const MYSQL_KEY_PLACEHOLDER: &str = "REPLACE_WITH_32_BYTE_BASE64_KEY";
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MysqlUserConfig {
+    pub username: String,
+    pub password: String,
+    pub encryption_key_base64: String,
+}
+
+/// 读取 `mysql.toml` 中的 username / password / encryption_key_base64。
+///
+/// 占位符会被视为空字符串，方便前端提示手动填写。
+#[tauri::command]
+pub fn get_mysql_user_config(
+    mysql: tauri::State<'_, MySqlProfileState>,
+) -> Result<MysqlUserConfig, String> {
+    let path = &mysql.config_path;
+    let content = std::fs::read_to_string(path)
+        .map_err(|err| format!("无法读取 MySQL 配置文件：{}；{}", path.display(), err))?;
+
+    let username = read_toml_string_field(&content, "username").unwrap_or_default();
+    let mut password = read_toml_string_field(&content, "password").unwrap_or_default();
+    if password == MYSQL_PASSWORD_PLACEHOLDER {
+        password.clear();
+    }
+    let mut key = read_toml_string_field(&content, "encryption_key_base64").unwrap_or_default();
+    if key == MYSQL_KEY_PLACEHOLDER {
+        key.clear();
+    }
+
+    Ok(MysqlUserConfig {
+        username: if username.is_empty() {
+            "root".to_string()
+        } else {
+            username
+        },
+        password,
+        encryption_key_base64: key,
+    })
+}
+
+/// 更新 `mysql.toml` 中的 username / password / encryption_key_base64，
+/// 保留文件中的其余字段与注释。
+#[tauri::command]
+pub fn update_mysql_user_config(
+    mysql: tauri::State<'_, MySqlProfileState>,
+    username: String,
+    password: String,
+    encryption_key_base64: String,
+) -> Result<(), String> {
+    let username = {
+        let trimmed = username.trim();
+        if trimmed.is_empty() {
+            "root".to_string()
+        } else {
+            trimmed.to_string()
+        }
+    };
+    let password = password.trim().to_string();
+    let key = encryption_key_base64.trim().to_string();
+
+    if password.is_empty() {
+        return Err("请填写 MySQL 密码".to_string());
+    }
+    if key.is_empty() {
+        return Err("请填写 encryption_key_base64".to_string());
+    }
+
+    // 校验加密密钥必须是解码后 32 字节的 Base64，避免写入无效配置。
+    let key_bytes = BASE64
+        .decode(&key)
+        .map_err(|_| "encryption_key_base64 不是有效的 Base64".to_string())?;
+    if key_bytes.len() != 32 {
+        return Err(format!(
+            "encryption_key_base64 解码后必须是 32 字节，当前为 {} 字节",
+            key_bytes.len()
+        ));
+    }
+
+    let path = &mysql.config_path;
+    let content = std::fs::read_to_string(path)
+        .map_err(|err| format!("无法读取 MySQL 配置文件：{}；{}", path.display(), err))?;
+
+    let content = write_toml_string_field(&content, "username", &username);
+    let content = write_toml_string_field(&content, "password", &password);
+    let content = write_toml_string_field(&content, "encryption_key_base64", &key);
+
+    std::fs::write(path, content)
+        .map_err(|err| format!("无法写入 MySQL 配置文件：{}；{}", path.display(), err))?;
+    Ok(())
+}
+
+/// 判断某行是否为指定键的 TOML 赋值（`key = ...`），忽略前导空白与注释。
+fn line_is_key_assignment(line: &str, key: &str) -> bool {
+    let trimmed = line.trim_start();
+    if trimmed.starts_with('#') || !trimmed.starts_with(key) {
+        return false;
+    }
+    let after = trimmed[key.len()..].trim_start();
+    after.starts_with('=')
+}
+
+/// 读取 TOML 基本字符串字段的值（去除引号与转义）。
+fn read_toml_string_field(content: &str, key: &str) -> Option<String> {
+    for line in content.lines() {
+        if !line_is_key_assignment(line, key) {
+            continue;
+        }
+        let after = line.trim_start();
+        let value_part = after[after.find('=')? + 1..].trim();
+        let unquoted = value_part
+            .strip_prefix('"')
+            .and_then(|rest| rest.strip_suffix('"'))
+            .unwrap_or(value_part);
+        return Some(unquoted.replace("\\\"", "\"").replace("\\\\", "\\"));
+    }
+    None
+}
+
+/// 写入（或追加）TOML 基本字符串字段，保留其它行不变。
+fn write_toml_string_field(content: &str, key: &str, value: &str) -> String {
+    let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
+    let new_line = format!("{key} = \"{escaped}\"");
+
+    let mut replaced = false;
+    let mut out_lines: Vec<String> = Vec::new();
+    for line in content.lines() {
+        if !replaced && line_is_key_assignment(line, key) {
+            out_lines.push(new_line.clone());
+            replaced = true;
+        } else {
+            out_lines.push(line.to_string());
+        }
+    }
+    if !replaced {
+        out_lines.push(new_line);
+    }
+
+    let mut result = out_lines.join("\n");
+    if content.ends_with('\n') {
+        result.push('\n');
+    }
+    result
 }
 
 #[tauri::command]

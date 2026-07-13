@@ -228,6 +228,41 @@ export async function getVectorPoints(): Promise<VectorPoint[]> {
 	return invoke<VectorPoint[]>('get_vector_points');
 }
 
+// ── 数据库用户凭据配置（mysql.toml） ────────────────────────────────────────
+
+/** `mysql.toml` 中的数据库用户凭据配置。 */
+export interface DbUserConfig {
+	/** MySQL 用户名（默认 root）。 */
+	username: string;
+	/** MySQL 密码。 */
+	password: string;
+	/** 32 字节 Base64 加密密钥（对应 `encryption_key_base64`）。 */
+	secretKey: string;
+}
+
+/** 读取 `mysql.toml` 中的用户名、密码与 encryption_key_base64。 */
+export async function loadDbUserConfig(): Promise<DbUserConfig> {
+	const config = await invoke<{
+		username: string;
+		password: string;
+		encryptionKeyBase64: string;
+	}>('get_mysql_user_config');
+	return {
+		username: config.username,
+		password: config.password,
+		secretKey: config.encryptionKeyBase64,
+	};
+}
+
+/** 更新 `mysql.toml` 中的用户名、密码与 encryption_key_base64。 */
+export async function saveDbUserConfig(config: DbUserConfig): Promise<void> {
+	return invoke('update_mysql_user_config', {
+		username: config.username,
+		password: config.password,
+		encryptionKeyBase64: config.secretKey,
+	});
+}
+
 // ── Remote Machine SSH ───────────────────────────────────────────────────
 
 /** 从 MySQL 加载远程机器配置列表。 */
@@ -364,6 +399,11 @@ export async function sshReadFile(connectionId: string, path: string): Promise<s
 	return invoke<string>('ssh_read_file', { connectionId, path });
 }
 
+/** 读取远程文件原始字节，返回 base64 字符串。 */
+export async function sshReadFileBytes(connectionId: string, path: string): Promise<string> {
+	return invoke<string>('ssh_read_file_bytes', { connectionId, path });
+}
+
 /** 覆盖写入远程文本文件内容。 */
 export async function sshWriteFile(connectionId: string, path: string, content: string): Promise<void> {
 	return invoke('ssh_write_file', { connectionId, path, content });
@@ -377,6 +417,11 @@ export async function sshWatchFile(connectionId: string, path: string): Promise<
 /** 停止监视远程文件。 */
 export async function sshUnwatchFile(connectionId: string, path: string): Promise<void> {
 	return invoke('ssh_unwatch_file', { connectionId, path });
+}
+
+/** 在远程机器上执行命令，返回合并的 stdout + stderr 输出。 */
+export async function sshExecCommand(connectionId: string, command: string, cwd?: string): Promise<string> {
+	return invoke('ssh_exec_command', { connectionId, command, cwd });
 }
 
 /** 订阅远程文件变更事件。 */

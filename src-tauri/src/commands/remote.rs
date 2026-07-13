@@ -5,6 +5,7 @@
 //!   C:\  →  /C:/
 
 use async_trait::async_trait;
+use base64::{engine::general_purpose, Engine as _};
 use russh::client::{self, Config, Handle};
 use russh::ChannelMsg;
 use russh_keys::key::PublicKey;
@@ -827,6 +828,29 @@ pub async fn ssh_read_file(
     decode_lossy_text_file(&path, buf)
 }
 
+/// 读取远程文件原始字节，返回 base64 字符串，用于下载文件。
+#[tauri::command]
+pub async fn ssh_read_file_bytes(
+    state: tauri::State<'_, SshState>,
+    connection_id: String,
+    path: String,
+) -> Result<String, String> {
+    let handle = connection_handle(&state, &connection_id).await?;
+
+    let sftp = open_sftp(&handle).await?;
+    let mut file = sftp
+        .open(&path)
+        .await
+        .map_err(|e| format!("打开文件失败 ({}): {}", path, e))?;
+
+    let mut buf = Vec::new();
+    file.read_to_end(&mut buf)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    Ok(general_purpose::STANDARD.encode(buf))
+}
+
 /// 覆盖写入远程文件内容。
 #[tauri::command]
 pub async fn ssh_write_file(
@@ -1119,4 +1143,63 @@ pub async fn ssh_unwatch_file(
     let conn = guard.get_mut(&connection_id).ok_or("未连接")?;
     conn.watchers.remove(&path);
     Ok(())
+}
+
+/// 在远程机器上执行一条 shell 命令，返回合并后的 stdout + stderr 内容。
+#[tauri::command]
+pub async fn ssh_exec_command(
+    state: tauri::State<'_, SshState>,
+    connection_id: String,
+    command: String,
+    cwd: Option<String>,
+) -> Result<String, String> {
+    let handle = connection_handle(&state, &connection_id).await?;
+
+    // 限制命令长度，防止注入超长负载
+    if command.len() > 4096 {
+        return Err("命令长度超出限制（4096 字节）".to_string());
+    }
+
+    let mut channel = handle
+        .channel_open_session()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // 使用 cmd 执行，必要时先切换工作目录，并合并 stderr 到 stdout。
+    // 注意：嵌套引号使用 cmd /s /c "..." 语法，内部引号不需要额外转义。
+    let wrapped = match cwd.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+        Some(path) => {
+            let windows_path = sftp_to_windows(path);
+            format!(
+                "cmd /d /s /c \"cd /d \"{}\" && {} 2>&1\"",
+                windows_path, command
+            )
+        }
+        None => format!("cmd /d /s /c \"{} 2>&1\"", command),
+    };
+    channel
+        .exec(true, wrapped.as_str())
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let mut stdout_buf = Vec::new();
+    let mut stderr_buf = Vec::new();
+    loop {
+        match channel.wait().await {
+            Some(ChannelMsg::Data { data }) => stdout_buf.extend_from_slice(&data),
+            Some(ChannelMsg::ExtendedData { data, .. }) => stderr_buf.extend_from_slice(&data),
+            Some(ChannelMsg::Eof) | None => break,
+            _ => {}
+        }
+    }
+
+    let mut output = String::from_utf8_lossy(&stdout_buf).into_owned();
+    let stderr_str = String::from_utf8_lossy(&stderr_buf).into_owned();
+    if !stderr_str.trim().is_empty() {
+        if !output.is_empty() {
+            output.push('\n');
+        }
+        output.push_str(&stderr_str);
+    }
+    Ok(output)
 }

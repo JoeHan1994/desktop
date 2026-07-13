@@ -80,6 +80,8 @@ fn main() {
             remote_profiles::delete_hyperv_vm_credential,
             remote_profiles::delete_hyperv_vm_credentials_by_parent_profile_id,
             remote_profiles::import_legacy_hyperv_vm_credentials,
+            remote_profiles::get_mysql_user_config,
+            remote_profiles::update_mysql_user_config,
             remote::winrm_run_open_ssh_setup,
             remote::rdp_open,
             remote::ssh_connect,
@@ -89,9 +91,11 @@ fn main() {
             remote::ssh_set_hyperv_vm_state,
             remote::ssh_list_dir,
             remote::ssh_read_file,
+            remote::ssh_read_file_bytes,
             remote::ssh_write_file,
             remote::ssh_watch_file,
             remote::ssh_unwatch_file,
+            remote::ssh_exec_command,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

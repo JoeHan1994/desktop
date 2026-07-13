@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Icon } from '@/components/ui/Icon';
 import { MarkdownContent } from '@/components/ui/MarkdownContent';
@@ -13,6 +14,8 @@ import {
 	importLegacyRemoteMachineProfiles,
 	listHyperVVmCredentialProfiles,
 	listRemoteMachineProfiles,
+	loadDbUserConfig,
+	saveDbUserConfig,
 	rdpOpen,
 	sshConnect,
 	sshDisconnect,
@@ -20,10 +23,12 @@ import {
 	sshListHyperVVMs,
 	sshListDir,
 	sshReadFile,
+	sshReadFileBytes,
 	sshSetHyperVVMState,
 	sshUnwatchFile,
 	sshWatchFile,
 	sshWriteFile,
+	sshExecCommand,
 	subscribeRemoteFileChanged,
 	subscribeWinRmOpenSshSetupOutput,
 	upsertRemoteMachineProfile,
@@ -77,6 +82,12 @@ interface WinRmOpenSshSetupTarget {
 	sshPort?: string;
 }
 
+interface FileContextMenuState {
+	node: TreeNode;
+	x: number;
+	y: number;
+}
+
 interface RemoteMachineImportResult {
 	profiles: RemoteMachineProfile[];
 	vmCredentials: HyperVVmCredentialProfile[];
@@ -99,6 +110,36 @@ function buildNodes(entries: FileEntry[]): TreeNode[] {
 function sftpToDisplay(path: string): string {
 	// /C:/ → C:\
 	return path.replace(/^\/([A-Za-z]):\//, '$1:\\').replace(/\//g, '\\');
+}
+
+function sftpParentPath(path: string): string {
+	const trimmed = path.replace(/\/+$/, '');
+	if (/^\/[A-Za-z]:$/.test(trimmed)) return `${trimmed}/`;
+	const lastSlash = trimmed.lastIndexOf('/');
+	if (lastSlash <= 0) return path;
+	const parent = trimmed.slice(0, lastSlash);
+	return /^\/[A-Za-z]:$/.test(parent) ? `${parent}/` : parent;
+}
+
+function remoteFileName(path: string): string {
+	const trimmed = path.replace(/\/+$/, '');
+	return trimmed.split('/').pop() || 'remote-file';
+}
+
+function downloadBase64File(base64: string, filename: string) {
+	const binary = atob(base64);
+	const bytes = new Uint8Array(binary.length);
+	for (let index = 0; index < binary.length; index += 1) {
+		bytes[index] = binary.charCodeAt(index);
+	}
+	const url = URL.createObjectURL(new Blob([bytes]));
+	const anchor = document.createElement('a');
+	anchor.href = url;
+	anchor.download = filename;
+	document.body.appendChild(anchor);
+	anchor.click();
+	anchor.remove();
+	URL.revokeObjectURL(url);
 }
 
 /** 从 SFTP 磁盘路径（/C:/）提取盘符显示名（C:）。 */
@@ -798,6 +839,7 @@ function TreeItem({
 	onSelect,
 	onToggle,
 	onToggleAnalysis,
+	onContextMenu,
 }: {
 	node: TreeNode;
 	depth: number;
@@ -806,6 +848,7 @@ function TreeItem({
 	onSelect: (n: TreeNode) => void;
 	onToggle: (n: TreeNode) => void;
 	onToggleAnalysis: (n: TreeNode) => void;
+	onContextMenu: (n: TreeNode, event: React.MouseEvent<HTMLButtonElement>) => void;
 }) {
 	const isSelected = selected === node.path;
 	const isAnalysisSelected = analysisSelected.has(node.path);
@@ -815,6 +858,7 @@ function TreeItem({
 			<button
 				type="button"
 				onClick={() => (node.is_dir ? onToggle(node) : onSelect(node))}
+				onContextMenu={(event) => onContextMenu(node, event)}
 				title={sftpToDisplay(node.path)}
 				className={`flex w-full items-center gap-1.5 rounded-lg py-[3px] text-left text-[12px] transition-colors
           ${isSelected ? 'bg-white/10 text-white' : 'text-white/55 hover:bg-white/[0.05] hover:text-white/85'}`}
@@ -891,6 +935,7 @@ function TreeItem({
 									onSelect={onSelect}
 									onToggle={onToggle}
 									onToggleAnalysis={onToggleAnalysis}
+									onContextMenu={onContextMenu}
 								/>
 							))
 						)}
@@ -971,6 +1016,18 @@ const VM_START_IP_REFRESH_DELAY_MS = 1200;
 const DEFAULT_RDP_PORT = '3389';
 const DEFAULT_WINRM_PORT = 5985;
 
+// ── 心跳 & 自动重连 ──────────────────────────────────────────────────────
+const HEARTBEAT_INTERVAL_MS = 15_000;
+const HEARTBEAT_TIMEOUT_MS = 8_000;
+const AUTO_RECONNECT_DELAY_MS = 3_000;
+const AUTO_RECONNECT_MAX_RETRIES = 3;
+
+// ── 终端脚本上传 ──────────────────────────────────────────────────────────
+const SCRIPT_EXTENSIONS = new Set(['ps1', 'sh', 'bat', 'cmd', 'py']);
+const REMOTE_SCRIPT_TEMP_DIR = '/C:/Windows/Temp';
+
+type ConnectionHealth = 'healthy' | 'checking' | 'unhealthy' | 'reconnecting';
+
 interface RemoteActionButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
 	icon: string;
 	label: string;
@@ -1036,9 +1093,7 @@ function findHostConflict(
 ): RemoteMachineProfile | undefined {
 	const nextHost = hostIdentity(nextProfile.host);
 	if (!nextHost) return undefined;
-	const allowedIds = new Set(
-		[nextProfile.id, previousProfileId ?? ''].filter((id): id is string => Boolean(id)),
-	);
+	const allowedIds = new Set([nextProfile.id, previousProfileId ?? ''].filter((id): id is string => Boolean(id)));
 	return profiles.find((profile) => hostIdentity(profile.host) === nextHost && !allowedIds.has(profile.id));
 }
 
@@ -1372,6 +1427,14 @@ export function RemoteMachineView() {
 	const [importNotice, setImportNotice] = useState('');
 	const [importError, setImportError] = useState('');
 
+	// DB user 配置
+	const [dbConfigOpen, setDbConfigOpen] = useState(false);
+	const [dbUsername, setDbUsername] = useState('root');
+	const [dbPassword, setDbPassword] = useState('');
+	const [dbSecretKey, setDbSecretKey] = useState('');
+	const [dbConfigSaving, setDbConfigSaving] = useState(false);
+	const [dbConfigError, setDbConfigError] = useState('');
+
 	// 在线连接池
 	const [connections, setConnections] = useState<RemoteConnection[]>([]);
 	const [activeConnectionId, setActiveConnectionId] = useState<string | null>(null);
@@ -1399,6 +1462,33 @@ export function RemoteMachineView() {
 	const unlistenRef = useRef<(() => void) | null>(null);
 	const isDirty = useRef(false);
 	const saveMsgTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+	// 右侧面板 tab
+	const [rightPanelTab, setRightPanelTab] = useState<'file' | 'terminal'>('file');
+
+	// SSH Terminal
+	interface SshTerminalEntry {
+		id: string;
+		type: 'input' | 'output' | 'error';
+		text: string;
+		cwd?: string;
+	}
+	const [sshTerminalHistory, setSshTerminalHistory] = useState<SshTerminalEntry[]>([]);
+	const [sshTerminalInput, setSshTerminalInput] = useState('');
+	const [sshTerminalRunning, setSshTerminalRunning] = useState(false);
+	const [sshTerminalCwd, setSshTerminalCwd] = useState<string | null>(null);
+	const sshTerminalScrollRef = useRef<HTMLDivElement>(null);
+	const sshTerminalInputRef = useRef<HTMLInputElement>(null);
+	const [treeContextMenu, setTreeContextMenu] = useState<FileContextMenuState | null>(null);
+	const [treeActionMsg, setTreeActionMsg] = useState('');
+
+	// ── 心跳 & 自动重连 ─────────────────────────────────────────────────────
+	const [connectionHealth, setConnectionHealth] = useState<Record<string, ConnectionHealth>>({});
+	const reconnectRetriesRef = useRef<Record<string, number>>({});
+
+	// ── 终端脚本上传 ──────────────────────────────────────────────────────────
+	const [scriptUploading, setScriptUploading] = useState(false);
+	const scriptFileRef = useRef<HTMLInputElement | null>(null);
 
 	// 当前文件分析
 	const [analysisOpen, setAnalysisOpen] = useState(false);
@@ -1512,6 +1602,84 @@ export function RemoteMachineView() {
 		if (!winRmTerminalOpen) return;
 		winRmTerminalScrollRef.current?.scrollTo({ top: winRmTerminalScrollRef.current.scrollHeight });
 	}, [winRmTerminalLines, winRmTerminalOpen]);
+
+	// 自动滚动 SSH Terminal
+	useEffect(() => {
+		sshTerminalScrollRef.current?.scrollTo({ top: sshTerminalScrollRef.current.scrollHeight });
+	}, [sshTerminalHistory]);
+
+	const handleSshTerminalExec = useCallback(async () => {
+		const cmd = sshTerminalInput.trim();
+		if (!cmd || !activeConnectionId || sshTerminalRunning) return;
+		setSshTerminalInput('');
+		setSshTerminalHistory((prev) => [
+			...prev,
+			{ id: `${Date.now()}-in`, type: 'input', text: cmd, cwd: sshTerminalCwd ?? undefined },
+		]);
+		setSshTerminalRunning(true);
+		try {
+			// 检测目录切换命令：cd / cd /d / pushd / 裸盘符（如 c: d:）
+			const cdMatch = cmd.match(/^\s*cd(?:\s+\/d)?\s+(.+)/i);
+			const pushdMatch = cmd.match(/^\s*pushd\s+(.+)/i);
+			const isBareCD = /^\s*cd\s*$/i.test(cmd);
+			const isDriveLetter = /^\s*[A-Za-z]:\s*$/i.test(cmd);
+			const navMatch = cdMatch || pushdMatch;
+			if (navMatch || isBareCD || isDriveLetter) {
+				// 在远程验证目录是否存在，获取解析后的绝对路径
+				const cdTarget = navMatch ? navMatch[1].replace(/^["']|["']$/g, '').trim() : isDriveLetter ? cmd.trim() : '';
+				let verifyCmd: string;
+				if (!cdTarget) {
+					verifyCmd = 'cd';
+				} else if (/^[A-Za-z]:$/.test(cdTarget)) {
+					// 纯盘符：cd /d X:\ && cd
+					verifyCmd = `cd /d ${cdTarget}\\ && cd`;
+				} else {
+					verifyCmd = `cd /d "${cdTarget}" && cd`;
+				}
+				const resolved = await sshExecCommand(activeConnectionId, verifyCmd, sshTerminalCwd ?? undefined);
+				const newCwd = resolved.trim().split('\n').pop()?.trim();
+				if (newCwd) {
+					// 将 Windows 路径转换回 SFTP 格式用于后续命令
+					const sftpCwd = '/' + newCwd.replace(/\\/g, '/');
+					setSshTerminalCwd(sftpCwd);
+				} else {
+					setSshTerminalHistory((prev) => [
+						...prev,
+						{ id: `${Date.now()}-err`, type: 'error', text: resolved || '无法切换目录' },
+					]);
+				}
+			} else {
+				const output = await sshExecCommand(activeConnectionId, cmd, sshTerminalCwd ?? undefined);
+				setSshTerminalHistory((prev) => [...prev, { id: `${Date.now()}-out`, type: 'output', text: output }]);
+			}
+		} catch (err) {
+			setSshTerminalHistory((prev) => [...prev, { id: `${Date.now()}-err`, type: 'error', text: String(err) }]);
+		} finally {
+			setSshTerminalRunning(false);
+			setTimeout(() => sshTerminalInputRef.current?.focus(), 50);
+		}
+	}, [sshTerminalInput, activeConnectionId, sshTerminalRunning, sshTerminalCwd]);
+
+	useEffect(() => {
+		if (!treeContextMenu) return;
+		const closeMenu = () => setTreeContextMenu(null);
+		// Use mousedown so the right-click that opened the menu doesn't immediately close it
+		const onMouseDown = (e: MouseEvent) => {
+			const target = e.target as HTMLElement;
+			if (target.closest('[data-tree-context-menu]')) return;
+			closeMenu();
+		};
+		window.addEventListener('mousedown', onMouseDown);
+		window.addEventListener('contextmenu', closeMenu);
+		window.addEventListener('resize', closeMenu);
+		window.addEventListener('scroll', closeMenu, true);
+		return () => {
+			window.removeEventListener('mousedown', onMouseDown);
+			window.removeEventListener('contextmenu', closeMenu);
+			window.removeEventListener('resize', closeMenu);
+			window.removeEventListener('scroll', closeMenu, true);
+		};
+	}, [treeContextMenu]);
 
 	const refreshProfileData = useCallback(async () => {
 		const [nextProfiles, nextCredentials] = await Promise.all([
@@ -1690,6 +1858,46 @@ export function RemoteMachineView() {
 		setConfigOpen(true);
 	}
 
+	async function openDbConfigForm() {
+		setDbConfigError('');
+		try {
+			const config = await loadDbUserConfig();
+			setDbUsername(config?.username?.trim() ? config.username : 'root');
+			setDbPassword(config?.password ?? '');
+			setDbSecretKey(config?.secretKey ?? '');
+		} catch {
+			setDbUsername('root');
+			setDbPassword('');
+			setDbSecretKey('');
+		}
+		setDbConfigOpen(true);
+	}
+
+	async function saveDbConfigFromForm() {
+		const username = dbUsername.trim() || 'root';
+		if (!dbPassword.trim()) {
+			setDbConfigError('请填写密码');
+			return;
+		}
+		if (!dbSecretKey.trim()) {
+			setDbConfigError('请填写 Secret Key');
+			return;
+		}
+		setDbConfigSaving(true);
+		setDbConfigError('');
+		try {
+			await saveDbUserConfig({ username, password: dbPassword, secretKey: dbSecretKey });
+			setDbUsername(username);
+			setImportError('');
+			setImportNotice('mysql.toml 已更新，重启应用后生效');
+			setDbConfigOpen(false);
+		} catch (err: unknown) {
+			setDbConfigError(String(err));
+		} finally {
+			setDbConfigSaving(false);
+		}
+	}
+
 	async function handleImportProfileFile(event: React.ChangeEvent<HTMLInputElement>) {
 		const selectedImportFile = event.target.files?.[0];
 		event.target.value = '';
@@ -1814,6 +2022,176 @@ export function RemoteMachineView() {
 			window.clearInterval(timer);
 		};
 	}, [connections, refreshHyperV]);
+
+	// ── 心跳检测 & 自动重连 ──────────────────────────────────────────────────
+	useEffect(() => {
+		if (connections.length === 0) return;
+
+		let cancelled = false;
+		let running = false;
+
+		const logReconnect = (stream: WinRmTerminalLine['stream'], text: string) => {
+			setWinRmTerminalLines((current) =>
+				[...current, { id: `reconnect:${current.length}:${Date.now()}`, stream, text }].slice(-500),
+			);
+		};
+
+		const heartbeat = async () => {
+			if (cancelled || running || document.hidden) return;
+			running = true;
+
+			for (const conn of connections) {
+				if (cancelled) break;
+				setConnectionHealth((prev) => ({ ...prev, [conn.id]: 'checking' }));
+				try {
+					await Promise.race([
+						sshExecCommand(conn.id, 'echo ok'),
+						new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), HEARTBEAT_TIMEOUT_MS)),
+					]);
+					setConnectionHealth((prev) => ({ ...prev, [conn.id]: 'healthy' }));
+					reconnectRetriesRef.current[conn.id] = 0;
+				} catch {
+					setConnectionHealth((prev) => ({ ...prev, [conn.id]: 'unhealthy' }));
+					// 自动重连
+					const retries = reconnectRetriesRef.current[conn.id] ?? 0;
+					const connLabel = conn.label || conn.host || conn.id;
+					if (retries < AUTO_RECONNECT_MAX_RETRIES) {
+						reconnectRetriesRef.current[conn.id] = retries + 1;
+						setConnectionHealth((prev) => ({ ...prev, [conn.id]: 'reconnecting' }));
+						logReconnect(
+							'status',
+							`[${connLabel}] 连接断开，正在重连 (${retries + 1}/${AUTO_RECONNECT_MAX_RETRIES})...`,
+						);
+						const profile = profiles.find((p) => p.id === conn.parentProfileId);
+						if (profile) {
+							try {
+								await delay(AUTO_RECONNECT_DELAY_MS);
+								if (cancelled) break;
+								await sshDisconnect(conn.id).catch(() => {});
+								const newConn = await sshConnect({
+									host: profile.host,
+									port: Number(normalizePort(profile.port)),
+									username: profile.username,
+									password: profile.password,
+									label: profile.label,
+									kind: conn.kind,
+									parentConnectionId: conn.parentConnectionId ?? undefined,
+									parentProfileId: conn.parentProfileId ?? undefined,
+									vmId: conn.vmId ?? undefined,
+								});
+								setConnections((prev) => prev.map((c) => (c.id === conn.id ? newConn : c)));
+								setConnectionHealth((prev) => {
+									const next = { ...prev, [newConn.id]: 'healthy' as ConnectionHealth };
+									delete next[conn.id];
+									return next;
+								});
+								reconnectRetriesRef.current[newConn.id] = 0;
+								delete reconnectRetriesRef.current[conn.id];
+								logReconnect('stdout', `[${connLabel}] 重连成功`);
+							} catch (err) {
+								setConnectionHealth((prev) => ({ ...prev, [conn.id]: 'unhealthy' }));
+								logReconnect('stderr', `[${connLabel}] 重连失败: ${err instanceof Error ? err.message : String(err)}`);
+							}
+						}
+					} else {
+						logReconnect('stderr', `[${connLabel}] 已达到最大重连次数 (${AUTO_RECONNECT_MAX_RETRIES})，停止重连`);
+						// 断开并移除连接
+						await sshDisconnect(conn.id).catch(() => {});
+						setConnections((prev) => {
+							const next = prev.filter((c) => c.id !== conn.id);
+							if (next.length === 0) setConnStatus('idle');
+							return next;
+						});
+						setConnectionHealth((prev) => {
+							const next = { ...prev };
+							delete next[conn.id];
+							return next;
+						});
+						delete reconnectRetriesRef.current[conn.id];
+					}
+				}
+			}
+			running = false;
+		};
+
+		const timer = window.setInterval(heartbeat, HEARTBEAT_INTERVAL_MS);
+		// 初次连接后稍等再开始心跳
+		const initTimer = window.setTimeout(heartbeat, 5000);
+
+		return () => {
+			cancelled = true;
+			window.clearInterval(timer);
+			window.clearTimeout(initTimer);
+		};
+	}, [connections, profiles]);
+
+	// ── 终端脚本上传 & 执行 ─────────────────────────────────────────────────
+	const handleScriptFileSelect = useCallback(
+		async (event: React.ChangeEvent<HTMLInputElement>) => {
+			const file = event.target.files?.[0];
+			event.target.value = '';
+			if (!file || !activeConnectionId) return;
+
+			const ext = file.name.split('.').pop()?.toLowerCase() ?? '';
+			if (!SCRIPT_EXTENSIONS.has(ext)) {
+				setSshTerminalHistory((prev) => [
+					...prev,
+					{
+						id: `${Date.now()}-err`,
+						type: 'error',
+						text: `不支持的脚本类型：.${ext}（支持：${[...SCRIPT_EXTENSIONS].join(', ')}）`,
+					},
+				]);
+				return;
+			}
+
+			setScriptUploading(true);
+			const remotePath = `${REMOTE_SCRIPT_TEMP_DIR}/_uploaded_${Date.now()}_${file.name}`;
+			try {
+				const content = await file.text();
+				await sshWriteFile(activeConnectionId, remotePath, content);
+
+				setSshTerminalHistory((prev) => [
+					...prev,
+					{ id: `${Date.now()}-upload`, type: 'output', text: `📤 已上传脚本到远程：${sftpToDisplay(remotePath)}` },
+				]);
+
+				// 根据扩展名选择执行方式
+				let execCmd: string;
+				const windowsPath = sftpToDisplay(remotePath);
+				if (ext === 'ps1') {
+					execCmd = `powershell -NoProfile -ExecutionPolicy Bypass -File "${windowsPath}"`;
+				} else if (ext === 'sh') {
+					execCmd = `bash "${windowsPath}"`;
+				} else if (ext === 'py') {
+					execCmd = `python "${windowsPath}"`;
+				} else {
+					execCmd = `"${windowsPath}"`;
+				}
+
+				setSshTerminalHistory((prev) => [
+					...prev,
+					{ id: `${Date.now()}-exec-in`, type: 'input', text: execCmd, cwd: sshTerminalCwd ?? undefined },
+				]);
+				setSshTerminalRunning(true);
+
+				const output = await sshExecCommand(activeConnectionId, execCmd, sshTerminalCwd ?? undefined);
+				setSshTerminalHistory((prev) => [
+					...prev,
+					{ id: `${Date.now()}-exec-out`, type: 'output', text: output || '(无输出)' },
+				]);
+			} catch (err: unknown) {
+				setSshTerminalHistory((prev) => [
+					...prev,
+					{ id: `${Date.now()}-exec-err`, type: 'error', text: `脚本执行失败：${String(err)}` },
+				]);
+			} finally {
+				setScriptUploading(false);
+				setSshTerminalRunning(false);
+			}
+		},
+		[activeConnectionId, sshTerminalCwd],
+	);
 
 	function updateVmPowerState(connectionId: string, vm: HyperVVirtualMachine, state: string) {
 		setConnectionHypervVms((prev) => {
@@ -2044,6 +2422,7 @@ export function RemoteMachineView() {
 	function handleSelectFile(node: TreeNode) {
 		if (!activeConnectionId) return;
 		setSelectedFile(node.path);
+		setSshTerminalCwd(sftpParentPath(node.path));
 		setFileContent('');
 		setEditorDraft('');
 		setIsEditing(false);
@@ -2054,6 +2433,47 @@ export function RemoteMachineView() {
 		setFilterProblemContext(false);
 		isDirty.current = false;
 		loadFile(activeConnectionId, node.path);
+	}
+
+	function showTreeActionMsg(message: string) {
+		setTreeActionMsg(message);
+		window.setTimeout(() => setTreeActionMsg(''), 1800);
+	}
+
+	function handleTreeContextMenu(node: TreeNode, event: React.MouseEvent<HTMLButtonElement>) {
+		event.preventDefault();
+		event.stopPropagation();
+		setTreeContextMenu({ node, x: event.clientX, y: event.clientY });
+	}
+
+	async function copyTreeNodePath(node: TreeNode) {
+		await navigator.clipboard.writeText(sftpToDisplay(node.path));
+		setTreeContextMenu(null);
+		showTreeActionMsg('已复制路径');
+	}
+
+	async function copyTreeNodeContent(node: TreeNode) {
+		if (!activeConnectionId || node.is_dir) return;
+		const content = await readRemoteFileWithRetry(activeConnectionId, node.path);
+		await navigator.clipboard.writeText(content);
+		setTreeContextMenu(null);
+		showTreeActionMsg('已复制文件内容');
+	}
+
+	async function downloadTreeNodeFile(node: TreeNode) {
+		if (!activeConnectionId || node.is_dir) return;
+		const base64 = await sshReadFileBytes(activeConnectionId, node.path);
+		downloadBase64File(base64, remoteFileName(node.path));
+		setTreeContextMenu(null);
+		showTreeActionMsg('已开始下载');
+	}
+
+	function openTreeNodeInTerminal(node: TreeNode) {
+		const cwd = node.is_dir ? node.path : sftpParentPath(node.path);
+		setSshTerminalCwd(cwd);
+		setRightPanelTab('terminal');
+		setTreeContextMenu(null);
+		window.setTimeout(() => sshTerminalInputRef.current?.focus(), 50);
 	}
 
 	function handleToggleAnalysisFile(node: TreeNode) {
@@ -2669,204 +3089,329 @@ export function RemoteMachineView() {
 	// ── 渲染 ────────────────────────────────────────────────────────────────
 
 	return (
-		<div className="flex h-full flex-col gap-3 overflow-hidden">
-			<div className="flex shrink-0 items-center justify-between gap-3">
-				<div className="min-w-0">
-					<div className="text-[11px] text-white/35">系统 · Remote Machines</div>
-					<div className="flex min-w-0 items-center gap-2">
-						<h1 className="truncate text-xl font-semibold tracking-tight text-white/85">远程机器</h1>
-						<span
-							className="shrink-0 rounded-lg bg-emerald-500/10 px-2 py-0.5 text-[11px] font-medium text-emerald-400"
-							title="当前在线数量"
+		<>
+			<div className="flex h-full flex-col gap-3 overflow-hidden">
+				<div className="flex shrink-0 items-center justify-between gap-3">
+					<div className="min-w-0">
+						<div className="text-[11px] text-white/35">系统 · Remote Machines</div>
+						<div className="flex min-w-0 items-center gap-2">
+							<h1 className="truncate text-xl font-semibold tracking-tight text-white/85">远程机器</h1>
+							<span
+								className={`shrink-0 rounded-lg px-2 py-0.5 text-[11px] font-medium ${
+									connections.length > 0
+										? Object.values(connectionHealth).some((h) => h === 'unhealthy')
+											? 'bg-rose-500/10 text-rose-400'
+											: Object.values(connectionHealth).some((h) => h === 'reconnecting')
+												? 'bg-amber-500/10 text-amber-400'
+												: 'bg-emerald-500/10 text-emerald-400'
+										: 'bg-white/[0.06] text-white/40'
+								}`}
+								title="当前在线数量"
+							>
+								{connections.length > 0 ? `${connections.length} 在线` : '离线'}
+							</span>
+						</div>
+					</div>
+					<div className="flex items-center gap-1">
+						<input
+							ref={importFileRef}
+							type="file"
+							accept="application/json,.json"
+							className="hidden"
+							onChange={(event) => void handleImportProfileFile(event)}
+						/>
+						<button
+							type="button"
+							onClick={() => void openDbConfigForm()}
+							title="配置 DB user"
+							aria-label="配置 DB user"
+							className="flex h-8 items-center gap-1 rounded-lg px-2 text-xs font-medium text-white transition-all disabled:cursor-not-allowed disabled:opacity-35"
+							style={{
+								background: 'rgb(var(--glass-rgb) / 0.08)',
+								border: '1px solid rgb(255 255 255 / 0.12)',
+							}}
 						>
-							{connections.length} 在线
-						</span>
+							<Icon name="database" className="h-3.5 w-3.5" aria-hidden="true" />
+							DB Config
+						</button>
+						<button
+							type="button"
+							onClick={openAnalysisModal}
+							disabled={!canOpenAnalysis}
+							title={analysisButtonTitle}
+							className="flex h-8 items-center gap-1 rounded-lg px-2 text-xs font-medium text-white transition-all disabled:cursor-not-allowed disabled:opacity-35"
+							style={{
+								background: 'rgb(var(--glass-rgb) / 0.08)',
+								border: '1px solid rgb(255 255 255 / 0.12)',
+							}}
+						>
+							<Icon name="chat" className="h-3.5 w-3.5" aria-hidden="true" />
+							Analyze
+						</button>
+						<button
+							type="button"
+							onClick={() => importFileRef.current?.click()}
+							disabled={importingProfiles}
+							className="flex h-8 items-center gap-1 rounded-lg px-2 text-xs font-medium text-white transition-all disabled:cursor-not-allowed disabled:opacity-35"
+							style={{
+								background: 'rgb(var(--glass-rgb) / 0.08)',
+								border: '1px solid rgb(255 255 255 / 0.12)',
+							}}
+						>
+							<Icon
+								name={importingProfiles ? 'loader' : 'upload'}
+								className={`h-3.5 w-3.5 ${importingProfiles ? 'animate-spin' : ''}`}
+								aria-hidden="true"
+							/>
+							Import
+						</button>
+						<a
+							href="/downloads/remote-machine-import-template.json"
+							download
+							className="flex h-8 items-center gap-1 rounded-lg px-2 text-xs font-medium text-white/65 transition-all hover:text-white"
+							style={{
+								background: 'rgb(var(--glass-rgb) / 0.06)',
+								border: '1px solid rgb(255 255 255 / 0.1)',
+							}}
+							title="下载导入 JSON 模板"
+							aria-label="下载导入 JSON 模板"
+						>
+							<Icon name="download" className="h-3.5 w-3.5" aria-hidden="true" />
+							模板
+						</a>
+						<button
+							type="button"
+							onClick={openNewProfileForm}
+							className="flex h-8 w-8 items-center justify-center rounded-lg text-white/75 transition-all hover:text-white"
+							style={{
+								background: 'rgb(var(--glass-rgb) / 0.08)',
+								border: '1px solid rgb(255 255 255 / 0.12)',
+							}}
+							title="新增远程机器"
+							aria-label="新增远程机器"
+						>
+							<Icon name="plus" className="h-4 w-4" aria-hidden="true" />
+						</button>
 					</div>
 				</div>
-				<div className="flex items-center gap-1">
-					<input
-						ref={importFileRef}
-						type="file"
-						accept="application/json,.json"
-						className="hidden"
-						onChange={(event) => void handleImportProfileFile(event)}
-					/>
-					<button
-						type="button"
-						onClick={openAnalysisModal}
-						disabled={!canOpenAnalysis}
-						title={analysisButtonTitle}
-						className="flex h-8 items-center gap-1 rounded-lg px-2 text-xs font-medium text-white transition-all disabled:cursor-not-allowed disabled:opacity-35"
-						style={{
-							background: 'rgb(var(--glass-rgb) / 0.08)',
-							border: '1px solid rgb(255 255 255 / 0.12)',
-						}}
-					>
-						<Icon name="chat" className="h-3.5 w-3.5" aria-hidden="true" />
-						Analyze
-					</button>
-					<button
-						type="button"
-						onClick={() => importFileRef.current?.click()}
-						disabled={importingProfiles}
-						className="flex h-8 items-center gap-1 rounded-lg px-2 text-xs font-medium text-white transition-all disabled:cursor-not-allowed disabled:opacity-35"
-						style={{
-							background: 'rgb(var(--glass-rgb) / 0.08)',
-							border: '1px solid rgb(255 255 255 / 0.12)',
-						}}
-					>
-						<Icon
-							name={importingProfiles ? 'loader' : 'upload'}
-							className={`h-3.5 w-3.5 ${importingProfiles ? 'animate-spin' : ''}`}
-							aria-hidden="true"
-						/>
-						Import
-					</button>
-					<a
-						href="/downloads/remote-machine-import-template.json"
-						download
-						className="flex h-8 items-center gap-1 rounded-lg px-2 text-xs font-medium text-white/65 transition-all hover:text-white"
-						style={{
-							background: 'rgb(var(--glass-rgb) / 0.06)',
-							border: '1px solid rgb(255 255 255 / 0.1)',
-						}}
-						title="下载导入 JSON 模板"
-						aria-label="下载导入 JSON 模板"
-					>
-						<Icon name="download" className="h-3.5 w-3.5" aria-hidden="true" />
-						模板
-					</a>
-					<button
-						type="button"
-						onClick={openNewProfileForm}
-						className="flex h-8 w-8 items-center justify-center rounded-lg text-white/75 transition-all hover:text-white"
-						style={{
-							background: 'rgb(var(--glass-rgb) / 0.08)',
-							border: '1px solid rgb(255 255 255 / 0.12)',
-						}}
-						title="新增远程机器"
-						aria-label="新增远程机器"
-					>
-						<Icon name="plus" className="h-4 w-4" aria-hidden="true" />
-					</button>
-				</div>
-			</div>
 
-			<AnimatePresence>
-				{(importNotice || importError) && (
-					<motion.div
-						initial={{ opacity: 0, y: -4 }}
-						animate={{ opacity: 1, y: 0 }}
-						exit={{ opacity: 0, y: -4 }}
-						className={`flex shrink-0 items-center gap-2 rounded-xl px-3 py-2 text-[11px] leading-relaxed ${
-							importError ? 'bg-rose-500/10 text-rose-300' : 'bg-emerald-500/10 text-emerald-300'
-						}`}
-					>
-						<Icon name={importError ? 'x' : 'check'} className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-						<span className="min-w-0 flex-1">{importError || importNotice}</span>
-					</motion.div>
-				)}
-			</AnimatePresence>
-
-			<AnimatePresence>
-				{configOpen && (
-					<motion.div
-						initial={{ opacity: 0 }}
-						animate={{ opacity: 1 }}
-						exit={{ opacity: 0 }}
-						className="fixed inset-0 z-50 flex items-center justify-center bg-black/55 px-4 backdrop-blur-sm"
-						onMouseDown={() => setConfigOpen(false)}
-					>
+				<AnimatePresence>
+					{(importNotice || importError) && (
 						<motion.div
-							initial={{ opacity: 0, scale: 0.96, y: 10 }}
-							animate={{ opacity: 1, scale: 1, y: 0 }}
-							exit={{ opacity: 0, scale: 0.96, y: 10 }}
-							transition={{ duration: 0.18, ease: 'easeOut' }}
-							className="glass app-popover relative w-full max-w-[340px] overflow-hidden px-3.5 py-3.5 shadow-2xl"
-							onMouseDown={(event) => event.stopPropagation()}
+							initial={{ opacity: 0, y: -4 }}
+							animate={{ opacity: 1, y: 0 }}
+							exit={{ opacity: 0, y: -4 }}
+							className={`flex shrink-0 items-center gap-2 rounded-xl px-3 py-2 text-[11px] leading-relaxed ${
+								importError ? 'bg-rose-500/10 text-rose-300' : 'bg-emerald-500/10 text-emerald-300'
+							}`}
 						>
-							<div className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-white/70 to-transparent" />
-							<div className="mb-3 flex items-center justify-between gap-3">
-								<div className="min-w-0">
-									<div className="text-[11px] text-white/35">
-										{pendingVmConnection ? 'Hyper-V VM' : 'Remote Machine'}
-									</div>
-									<h2 className="truncate text-base font-semibold text-white/80">
-										{pendingVmConnection ? '虚拟机凭据' : '配置预连接'}
-									</h2>
-								</div>
-								<button
-									type="button"
-									onClick={() => setConfigOpen(false)}
-									className="glass glass-icon-button glass-control h-8 w-8 shrink-0 rounded-full"
-									aria-label="关闭"
-									title="关闭"
-								>
-									<Icon name="x" className="h-4 w-4" aria-hidden="true" />
-								</button>
-							</div>
+							<Icon name={importError ? 'x' : 'check'} className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+							<span className="min-w-0 flex-1">{importError || importNotice}</span>
+						</motion.div>
+					)}
+				</AnimatePresence>
 
-							<div className="space-y-2.5">
-								<div className="space-y-1">
-									<label className="text-[11px] text-white/45">名称</label>
-									<input
-										className={fieldCls}
-										placeholder={pendingVmConnection ? 'VM Name' : 'Lab Server'}
-										value={profileName}
-										onChange={(e) => setProfileName(e.target.value)}
-										autoFocus
-									/>
-								</div>
-								<div
-									className={`grid gap-2 ${isVmCredentialForm ? 'grid-cols-[1fr_64px]' : 'grid-cols-[1fr_64px_72px]'}`}
-								>
-									<div className="space-y-1">
-										<label className="text-[11px] text-white/45">IP / 主机名</label>
-										<input
-											className={`${fieldCls} ${isVmCredentialForm ? 'cursor-pointer' : ''}`}
-											placeholder={isVmCredentialForm ? '点击获取虚拟机 IP' : '192.168.1.100'}
-											value={host}
-											readOnly={isVmCredentialForm}
-											title={isVmCredentialForm ? '虚拟机开机后点击自动获取 IP' : undefined}
-											onClick={() => {
-												if (pendingVmConnection) void handleFetchPendingVmHost();
-											}}
-											onChange={(e) => {
-												if (!pendingVmConnection) setHost(e.target.value);
-											}}
-										/>
-										{isFetchingVmIp && <div className="mt-1 text-[10px] text-white/30">正在获取 IP…</div>}
-									</div>
-									<div className="space-y-1">
-										<label className="text-[11px] text-white/45">SSH</label>
-										<input
-											className={fieldCls}
-											placeholder="22"
-											value={port}
-											onChange={(e) => setPort(e.target.value)}
-										/>
-									</div>
-									{!isVmCredentialForm && (
-										<div className="space-y-1">
-											<label className="text-[11px] text-white/45">RDP</label>
-											<input
-												className={fieldCls}
-												placeholder={DEFAULT_RDP_PORT}
-												value={rdpPort}
-												onChange={(e) => setRdpPort(e.target.value)}
-											/>
+				<AnimatePresence>
+					{configOpen && (
+						<motion.div
+							initial={{ opacity: 0 }}
+							animate={{ opacity: 1 }}
+							exit={{ opacity: 0 }}
+							className="fixed inset-0 z-50 flex items-center justify-center bg-black/55 px-4 backdrop-blur-sm"
+							onMouseDown={() => setConfigOpen(false)}
+						>
+							<motion.div
+								initial={{ opacity: 0, scale: 0.96, y: 10 }}
+								animate={{ opacity: 1, scale: 1, y: 0 }}
+								exit={{ opacity: 0, scale: 0.96, y: 10 }}
+								transition={{ duration: 0.18, ease: 'easeOut' }}
+								className="glass app-popover relative w-full max-w-[340px] overflow-hidden px-3.5 py-3.5 shadow-2xl"
+								onMouseDown={(event) => event.stopPropagation()}
+							>
+								<div className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-white/70 to-transparent" />
+								<div className="mb-3 flex items-center justify-between gap-3">
+									<div className="min-w-0">
+										<div className="text-[11px] text-white/35">
+											{pendingVmConnection ? 'Hyper-V VM' : 'Remote Machine'}
 										</div>
-									)}
+										<h2 className="truncate text-base font-semibold text-white/80">
+											{pendingVmConnection ? '虚拟机凭据' : '配置预连接'}
+										</h2>
+									</div>
+									<button
+										type="button"
+										onClick={() => setConfigOpen(false)}
+										className="glass glass-icon-button glass-control h-8 w-8 shrink-0 rounded-full"
+										aria-label="关闭"
+										title="关闭"
+									>
+										<Icon name="x" className="h-4 w-4" aria-hidden="true" />
+									</button>
 								</div>
+
 								<div className="space-y-2.5">
 									<div className="space-y-1">
-										<label className="text-[11px] text-white/45">账号</label>
+										<label className="text-[11px] text-white/45">名称</label>
 										<input
 											className={fieldCls}
-											placeholder="Administrator"
-											value={username}
-											onChange={(e) => setUsername(e.target.value)}
+											placeholder={pendingVmConnection ? 'VM Name' : 'Lab Server'}
+											value={profileName}
+											onChange={(e) => setProfileName(e.target.value)}
+											autoFocus
+										/>
+									</div>
+									<div
+										className={`grid gap-2 ${isVmCredentialForm ? 'grid-cols-[1fr_64px]' : 'grid-cols-[1fr_64px_72px]'}`}
+									>
+										<div className="space-y-1">
+											<label className="text-[11px] text-white/45">IP / 主机名</label>
+											<input
+												className={`${fieldCls} ${isVmCredentialForm ? 'cursor-pointer' : ''}`}
+												placeholder={isVmCredentialForm ? '点击获取虚拟机 IP' : '192.168.1.100'}
+												value={host}
+												readOnly={isVmCredentialForm}
+												title={isVmCredentialForm ? '虚拟机开机后点击自动获取 IP' : undefined}
+												onClick={() => {
+													if (pendingVmConnection) void handleFetchPendingVmHost();
+												}}
+												onChange={(e) => {
+													if (!pendingVmConnection) setHost(e.target.value);
+												}}
+											/>
+											{isFetchingVmIp && <div className="mt-1 text-[10px] text-white/30">正在获取 IP…</div>}
+										</div>
+										<div className="space-y-1">
+											<label className="text-[11px] text-white/45">SSH</label>
+											<input
+												className={fieldCls}
+												placeholder="22"
+												value={port}
+												onChange={(e) => setPort(e.target.value)}
+											/>
+										</div>
+										{!isVmCredentialForm && (
+											<div className="space-y-1">
+												<label className="text-[11px] text-white/45">RDP</label>
+												<input
+													className={fieldCls}
+													placeholder={DEFAULT_RDP_PORT}
+													value={rdpPort}
+													onChange={(e) => setRdpPort(e.target.value)}
+												/>
+											</div>
+										)}
+									</div>
+									<div className="space-y-2.5">
+										<div className="space-y-1">
+											<label className="text-[11px] text-white/45">账号</label>
+											<input
+												className={fieldCls}
+												placeholder="Administrator"
+												value={username}
+												onChange={(e) => setUsername(e.target.value)}
+												autoComplete="username"
+											/>
+										</div>
+										<div className="space-y-1">
+											<label className="text-[11px] text-white/45">密码</label>
+											<input
+												className={fieldCls}
+												type="password"
+												placeholder="••••••••"
+												value={password}
+												onChange={(e) => setPassword(e.target.value)}
+												autoComplete="current-password"
+											/>
+										</div>
+									</div>
+								</div>
+
+								<AnimatePresence>
+									{connError && (
+										<motion.p
+											initial={{ opacity: 0, height: 0 }}
+											animate={{ opacity: 1, height: 'auto' }}
+											exit={{ opacity: 0, height: 0 }}
+											className="mt-3 overflow-hidden rounded-xl bg-rose-500/10 px-3 py-2 text-[11px] leading-relaxed text-rose-400"
+										>
+											{connError}
+										</motion.p>
+									)}
+								</AnimatePresence>
+
+								<div className="mt-3 flex justify-end gap-2">
+									<button
+										type="button"
+										onClick={() => void saveProfileFromForm()}
+										disabled={isVmCredentialForm ? !username.trim() : !host.trim() || !username.trim()}
+										className="rounded-lg bg-white/[0.04] px-3 py-2 text-xs text-white/55 transition-colors hover:text-white disabled:cursor-not-allowed disabled:opacity-35"
+									>
+										{pendingVmConnection ? '保存凭据' : 'Save'}
+									</button>
+									<button
+										type="button"
+										onClick={() => {
+											void handleConnect();
+										}}
+										disabled={isConnecting || !host.trim() || !username.trim()}
+										className="rounded-lg px-3 py-2 text-xs font-medium text-white transition-all disabled:cursor-not-allowed disabled:opacity-35"
+										style={{
+											background: 'rgb(var(--accent-rgb) / 0.14)',
+											border: '1px solid rgb(var(--accent-rgb) / 0.3)',
+										}}
+									>
+										{isConnecting ? '连接中' : '连接'}
+									</button>
+								</div>
+							</motion.div>
+						</motion.div>
+					)}
+				</AnimatePresence>
+
+				<AnimatePresence>
+					{dbConfigOpen && (
+						<motion.div
+							initial={{ opacity: 0 }}
+							animate={{ opacity: 1 }}
+							exit={{ opacity: 0 }}
+							className="fixed inset-0 z-50 flex items-center justify-center bg-black/55 px-4 backdrop-blur-sm"
+							onMouseDown={() => setDbConfigOpen(false)}
+						>
+							<motion.div
+								initial={{ opacity: 0, scale: 0.96, y: 10 }}
+								animate={{ opacity: 1, scale: 1, y: 0 }}
+								exit={{ opacity: 0, scale: 0.96, y: 10 }}
+								transition={{ duration: 0.18, ease: 'easeOut' }}
+								className="glass app-popover relative w-full max-w-[340px] overflow-hidden px-3.5 py-3.5 shadow-2xl"
+								onMouseDown={(event) => event.stopPropagation()}
+							>
+								<div className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-white/70 to-transparent" />
+								<div className="mb-3 flex items-center justify-between gap-3">
+									<div className="min-w-0">
+										<div className="text-[11px] text-white/35">mysql.toml</div>
+										<h2 className="truncate text-base font-semibold text-white/80">DB User</h2>
+									</div>
+									<button
+										type="button"
+										onClick={() => setDbConfigOpen(false)}
+										className="glass glass-icon-button glass-control h-8 w-8 shrink-0 rounded-full"
+										aria-label="关闭"
+										title="关闭"
+									>
+										<Icon name="x" className="h-4 w-4" aria-hidden="true" />
+									</button>
+								</div>
+
+								<div className="space-y-2.5">
+									<div className="space-y-1">
+										<label className="text-[11px] text-white/45">用户名</label>
+										<input
+											className={fieldCls}
+											placeholder="root"
+											value={dbUsername}
+											onChange={(e) => setDbUsername(e.target.value)}
 											autoComplete="username"
+											autoFocus
 										/>
 									</div>
 									<div className="space-y-1">
@@ -2875,998 +3420,1286 @@ export function RemoteMachineView() {
 											className={fieldCls}
 											type="password"
 											placeholder="••••••••"
-											value={password}
-											onChange={(e) => setPassword(e.target.value)}
-											autoComplete="current-password"
+											value={dbPassword}
+											onChange={(e) => setDbPassword(e.target.value)}
+											autoComplete="new-password"
+										/>
+									</div>
+									<div className="space-y-1">
+										<label className="text-[11px] text-white/45">Secret Key（encryption_key_base64）</label>
+										<input
+											className={fieldCls}
+											type="password"
+											placeholder="32 字节 Base64 密钥"
+											value={dbSecretKey}
+											onChange={(e) => setDbSecretKey(e.target.value)}
+											autoComplete="off"
 										/>
 									</div>
 								</div>
-							</div>
 
-							<AnimatePresence>
-								{connError && (
-									<motion.p
-										initial={{ opacity: 0, height: 0 }}
-										animate={{ opacity: 1, height: 'auto' }}
-										exit={{ opacity: 0, height: 0 }}
-										className="mt-3 overflow-hidden rounded-xl bg-rose-500/10 px-3 py-2 text-[11px] leading-relaxed text-rose-400"
-									>
-										{connError}
-									</motion.p>
-								)}
-							</AnimatePresence>
-
-							<div className="mt-3 flex justify-end gap-2">
-								<button
-									type="button"
-									onClick={() => void saveProfileFromForm()}
-									disabled={isVmCredentialForm ? !username.trim() : !host.trim() || !username.trim()}
-									className="rounded-lg bg-white/[0.04] px-3 py-2 text-xs text-white/55 transition-colors hover:text-white disabled:cursor-not-allowed disabled:opacity-35"
-								>
-									{pendingVmConnection ? '保存凭据' : 'Save'}
-								</button>
-								<button
-									type="button"
-									onClick={() => {
-										void handleConnect();
-									}}
-									disabled={isConnecting || !host.trim() || !username.trim()}
-									className="rounded-lg px-3 py-2 text-xs font-medium text-white transition-all disabled:cursor-not-allowed disabled:opacity-35"
-									style={{
-										background: 'rgb(var(--accent-rgb) / 0.14)',
-										border: '1px solid rgb(var(--accent-rgb) / 0.3)',
-									}}
-								>
-									{isConnecting ? '连接中' : '连接'}
-								</button>
-							</div>
-						</motion.div>
-					</motion.div>
-				)}
-			</AnimatePresence>
-
-			<AnimatePresence>
-				{analysisOpen && !analysisMinimized && (
-					<motion.div
-						initial={{ opacity: 0 }}
-						animate={{ opacity: 1 }}
-						exit={{ opacity: 0 }}
-						className="fixed inset-0 z-50 flex items-center justify-center bg-black/55 px-4 backdrop-blur-sm"
-						onMouseDown={minimizeAnalysisModal}
-					>
-						<motion.div
-							initial={{ opacity: 0, scale: 0.96, y: 10 }}
-							animate={{ opacity: 1, scale: 1, y: 0 }}
-							exit={{ opacity: 0, scale: 0.96, y: 10 }}
-							transition={{ duration: 0.18, ease: 'easeOut' }}
-							className="glass app-popover relative flex h-[min(78vh,680px)] w-full max-w-[760px] flex-col overflow-hidden shadow-2xl"
-							onMouseDown={(event) => event.stopPropagation()}
-						>
-							<div className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-white/70 to-transparent" />
-							<div className="flex shrink-0 items-start justify-between gap-3 border-b border-white/[0.06] px-4 py-3">
-								<div className="min-w-0">
-									<div className="text-[11px] text-white/35">Remote File Analysis</div>
-									<h2 className="truncate text-base font-semibold text-white/80">文件内容分析</h2>
-									<div className="mt-1 truncate font-mono text-[11px] text-white/35" title={analysisStatusLabel}>
-										{analysisStatusLabel}
-									</div>
-								</div>
-								<div className="flex shrink-0 items-center gap-2">
-									<div className="relative">
-										<button
-											type="button"
-											onClick={() => setAnalysisModelOpen((value) => !value)}
-											disabled={providers.length === 0}
-											className="glass app-card-surface app-card-control glass-control flex h-8 min-w-[168px] max-w-[240px] items-center justify-between gap-2 rounded-lg px-2.5 text-left text-[11px] text-white/65 disabled:cursor-not-allowed disabled:opacity-35"
-											title={selectedAnalysisProvider ? selectedAnalysisProvider.model : '请先配置大模型'}
+								<AnimatePresence>
+									{dbConfigError && (
+										<motion.p
+											initial={{ opacity: 0, height: 0 }}
+											animate={{ opacity: 1, height: 'auto' }}
+											exit={{ opacity: 0, height: 0 }}
+											className="mt-3 overflow-hidden rounded-xl bg-rose-500/10 px-3 py-2 text-[11px] leading-relaxed text-rose-400"
 										>
-											<span
-												className="h-1.5 w-1.5 shrink-0 rounded-full"
-												style={{
-													backgroundColor: selectedAnalysisProvider
-														? PROVIDER_LABELS[selectedAnalysisProvider.provider].color
-														: 'rgb(255 255 255 / 0.25)',
-												}}
-											/>
-											<span className="min-w-0 flex-1 truncate">
-												{selectedAnalysisProvider ? selectedAnalysisProvider.name : '选择大模型'}
-											</span>
-											<span className="shrink-0 text-white/30">▾</span>
-										</button>
+											{dbConfigError}
+										</motion.p>
+									)}
+								</AnimatePresence>
 
-										<AnimatePresence>
-											{analysisModelOpen && providers.length > 0 && (
-												<motion.div
-													initial={{ opacity: 0, y: -4 }}
-													animate={{ opacity: 1, y: 0 }}
-													exit={{ opacity: 0, y: -4 }}
-													className="glass app-popover absolute right-0 top-full z-20 mt-2 max-h-64 w-72 overflow-y-auto rounded-xl p-1.5 shadow-2xl"
-												>
-													{providers.map((provider) => {
-														const meta = PROVIDER_LABELS[provider.provider];
-														const selected = selectedAnalysisProvider?.id === provider.id;
-														return (
-															<button
-																key={provider.id}
-																type="button"
-																onClick={() => {
-																	setAnalysisProviderId(provider.id);
-																	setAnalysisModelOpen(false);
-																}}
-																className={`flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left transition-colors ${
-																	selected
-																		? 'bg-white/[0.08] text-white'
-																		: 'text-white/55 hover:bg-white/[0.05] hover:text-white/80'
-																}`}
-															>
-																<span
-																	className="h-2 w-2 shrink-0 rounded-full"
-																	style={{ backgroundColor: meta.color }}
-																/>
-																<span className="min-w-0 flex-1">
-																	<span className="block truncate text-[12px] font-medium">{provider.name}</span>
-																	<span className="block truncate text-[10px] text-white/30">{provider.model}</span>
-																</span>
-																<span
-																	className="shrink-0 rounded-md bg-white/[0.04] px-1.5 py-0.5 text-[9px]"
-																	style={{ color: meta.color }}
-																>
-																	{meta.label}
-																</span>
-															</button>
-														);
-													})}
-												</motion.div>
-											)}
-										</AnimatePresence>
-									</div>
+								<div className="mt-3 flex justify-end gap-2">
 									<button
 										type="button"
-										onClick={() => void startFileAnalysis()}
-										disabled={!currentTargetsAnalyzing && !canStartAnalysis}
-										title={analysisStartTitle}
-										className="h-8 rounded-lg px-3 text-xs font-medium text-white transition-all disabled:cursor-not-allowed disabled:opacity-35"
+										onClick={() => setDbConfigOpen(false)}
+										className="rounded-lg bg-white/[0.04] px-3 py-2 text-xs text-white/55 transition-colors hover:text-white"
+									>
+										取消
+									</button>
+									<button
+										type="button"
+										onClick={() => void saveDbConfigFromForm()}
+										disabled={dbConfigSaving || !dbPassword.trim() || !dbSecretKey.trim()}
+										className="rounded-lg px-3 py-2 text-xs font-medium text-white transition-all disabled:cursor-not-allowed disabled:opacity-35"
 										style={{
-											background: currentTargetsAnalyzing ? 'rgb(244 63 94 / 0.16)' : 'rgb(var(--accent-rgb) / 0.14)',
-											border: currentTargetsAnalyzing
-												? '1px solid rgb(244 63 94 / 0.35)'
-												: '1px solid rgb(var(--accent-rgb) / 0.3)',
+											background: 'rgb(var(--accent-rgb) / 0.14)',
+											border: '1px solid rgb(var(--accent-rgb) / 0.3)',
 										}}
 									>
-										{currentTargetsAnalyzing ? 'Stop' : 'Start'}
+										{dbConfigSaving ? '保存中' : '保存'}
 									</button>
 								</div>
-							</div>
-
-							<div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
-								{providers.length === 0 ? (
-									<div className="flex h-full min-h-52 flex-col items-center justify-center gap-2 text-center text-white/30">
-										<Icon name="chat" className="h-8 w-8 text-white/20" aria-hidden="true" />
-										<div className="text-sm text-white/45">暂无可用大模型</div>
-										<div className="max-w-sm text-[11px] leading-relaxed text-white/25">
-											请先在设置页面添加 Model Provider，然后回到这里选择模型进行分析。
-										</div>
-									</div>
-								) : analysisError ? (
-									<div className="rounded-xl bg-rose-500/10 px-3 py-2 text-[12px] leading-relaxed text-rose-300">
-										{analysisError}
-									</div>
-								) : analysisResults.length > 0 ? (
-									<div className="space-y-3">
-										{analysisResults.map((result) => {
-											const active = result.status === 'pending' || result.status === 'running';
-											const languageContent = getAnalysisLanguageContent(result.output, result.language);
-											const statusText =
-												result.status === 'pending'
-													? '等待中'
-													: result.status === 'running'
-														? '分析中'
-														: result.status === 'done'
-															? '完成'
-															: result.status === 'aborted'
-																? '已停止'
-																: '失败';
-											const statusClass =
-												result.status === 'error'
-													? 'bg-rose-500/10 text-rose-300'
-													: active
-														? 'bg-sky-400/10 text-sky-200'
-														: 'bg-emerald-400/10 text-emerald-200';
-
-											return (
-												<div
-													key={result.path}
-													className="overflow-hidden rounded-xl border border-white/[0.06] bg-white/[0.025]"
-												>
-													<div className="flex items-center gap-2 border-b border-white/[0.05] px-3 py-2">
-														{active && (
-															<Icon
-																name="loader"
-																className="h-3.5 w-3.5 shrink-0 animate-spin text-white/35"
-																aria-hidden="true"
-															/>
-														)}
-														<span
-															className="min-w-0 flex-1 truncate font-mono text-[11px] text-white/45"
-															title={result.displayPath}
-														>
-															{result.displayPath}
-														</span>
-														<div className="flex shrink-0 overflow-hidden rounded-md bg-white/[0.04] p-0.5 ring-1 ring-white/[0.06]">
-															{(['en', 'ch'] as AnalysisLanguage[]).map((language) => (
-																<button
-																	key={language}
-																	type="button"
-																	onClick={() => updateAnalysisResult(result.path, (item) => ({ ...item, language }))}
-																	className={`h-5 min-w-8 rounded px-1.5 text-[10px] font-medium transition-colors ${
-																		result.language === language
-																			? 'bg-white/[0.1] text-white/80'
-																			: 'text-white/35 hover:text-white/65'
-																	}`}
-																>
-																	{language === 'en' ? 'EN' : 'CH'}
-																</button>
-															))}
-														</div>
-														{result.isFilteredLog && (
-															<span className="shrink-0 rounded-md bg-sky-400/10 px-1.5 py-0.5 text-[10px] text-sky-200">
-																CMTrace
-															</span>
-														)}
-														<span className={`shrink-0 rounded-md px-1.5 py-0.5 text-[10px] ${statusClass}`}>
-															{statusText}
-														</span>
-													</div>
-													<div className="select-text px-3.5 py-3">
-														{result.error ? (
-															<div className="rounded-lg bg-rose-500/10 px-3 py-2 text-[12px] leading-relaxed text-rose-300">
-																{result.error}
-															</div>
-														) : result.output ? (
-															languageContent.content ? (
-																<MarkdownContent content={languageContent.content} />
-															) : (
-																<div className="py-6 text-center text-[12px] text-white/30">
-																	{result.status === 'done'
-																		? `模型未返回 ${result.language === 'en' ? 'EN' : 'CH'} 结果`
-																		: `${result.language === 'en' ? 'EN' : 'CH'} 结果生成中…`}
-																</div>
-															)
-														) : (
-															<div className="py-6 text-center text-[12px] text-white/30">{result.statusDetail}</div>
-														)}
-													</div>
-												</div>
-											);
-										})}
-									</div>
-								) : (
-									<div className="flex h-full min-h-52 flex-col items-center justify-center gap-2 text-center text-white/30">
-										<Icon name="chat" className="h-8 w-8 text-white/20" aria-hidden="true" />
-										<div className="text-sm text-white/45">点击 Start 开始分析文件</div>
-										<div className="max-w-md text-[11px] leading-relaxed text-white/25">
-											勾选多个文件时，每个文件会作为独立分析任务并行执行。
-										</div>
-									</div>
-								)}
-								{isAnalyzing && (
-									<div className="mt-3 flex items-center gap-2 text-[11px] text-white/35">
-										<Icon name="loader" className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
-										{analysisTargetPaths.length > 1 ? '多文件并行分析中…' : '分析中…'}
-									</div>
-								)}
-							</div>
-
-							{totalAnalysisStats && (
-								<div className="flex shrink-0 items-center justify-end gap-3 border-t border-white/[0.05] px-4 py-2 text-[10px] text-white/30">
-									<span>Input {totalAnalysisStats.promptTokens.toLocaleString()}</span>
-									<span>Output {totalAnalysisStats.completionTokens.toLocaleString()}</span>
-									<span>{totalAnalysisStats.outputTps.toFixed(1)} tok/s</span>
-								</div>
-							)}
+							</motion.div>
 						</motion.div>
-					</motion.div>
-				)}
-			</AnimatePresence>
+					)}
+				</AnimatePresence>
 
-			<AnimatePresence>
-				{analysisOpen && analysisMinimized && (
-					<motion.button
-						type="button"
-						initial={{ opacity: 0, y: 12 }}
-						animate={{ opacity: 1, y: 0 }}
-						exit={{ opacity: 0, y: 12 }}
-						transition={{ duration: 0.18, ease: 'easeOut' }}
-						onClick={restoreAnalysisModal}
-						className="glass app-popover fixed bottom-4 right-16 z-50 flex max-w-[min(360px,calc(100vw-6rem))] items-center gap-2 rounded-xl px-3 py-2 text-left shadow-2xl transition-colors hover:bg-white/[0.08]"
-						title="恢复文件内容分析窗口"
-					>
-						{isAnalyzing ? (
-							<Icon name="loader" className="h-4 w-4 shrink-0 animate-spin text-white/45" aria-hidden="true" />
-						) : (
-							<Icon name="chat" className="h-4 w-4 shrink-0 text-white/35" aria-hidden="true" />
-						)}
-						<span className="min-w-0 flex-1">
-							<span className="block text-[12px] font-medium text-white/70">
-								{isAnalyzing
-									? '文件分析中'
-									: analysisError
-										? '分析出错'
-										: analysisResults.length > 0
-											? '分析结果'
-											: '文件内容分析'}
-							</span>
-							<span className="block truncate font-mono text-[10px] text-white/35">{analysisStatusLabel}</span>
-						</span>
-					</motion.button>
-				)}
-			</AnimatePresence>
-
-			<div className="grid h-full min-h-0 flex-1 grid-cols-[304px_304px_minmax(0,1fr)] gap-3 overflow-hidden">
-				<div className="flex min-h-0 flex-col overflow-hidden">
-					<div className="glass app-card relative flex min-h-0 flex-1 flex-col overflow-hidden">
-						<div className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-white/70 to-transparent" />
-						<div className="flex shrink-0 items-center justify-between border-b border-white/[0.06] px-3.5 py-2">
-							<span className="text-xs font-medium text-white/60">机器列表</span>
-							<span className="text-[10px] text-white/25">{profiles.length} 台</span>
-						</div>
-						<div className="min-h-0 flex-1 overflow-y-auto p-2">
-							{profiles.length === 0 ? (
-								<div className="flex h-full min-h-24 flex-col items-center justify-center gap-1 text-center text-white/25">
-									<span className="text-sm">暂无配置</span>
-									<span className="text-[11px]">点击右上角 + 添加，或导入 JSON</span>
-								</div>
-							) : (
-								<div className="space-y-1.5">
-									{profiles.map((profile) => {
-										const isProfileConnecting = connectingProfileId === profile.id;
-										const profileWinRmKey = `host:${profile.id}:winrm`;
-										const isProfileWinRmRunning = winRmBusyTargetKey === profileWinRmKey;
-										const profileRdpKey = `host:${profile.id}`;
-										const isProfileRdpOpening = rdpOpeningTarget === profileRdpKey;
-										const hostConnection =
-											hostConnections.find((connection) => connection.parentProfileId === profile.id) ?? null;
-										const hostActive = activeConnectionId === hostConnection?.id;
-										const hostVms = hostConnection ? (connectionHypervVms[hostConnection.id] ?? []) : [];
-										const vmsExpanded = hostConnection ? (hypervExpanded[hostConnection.id] ?? true) : false;
-										return (
-											<div
-												key={profile.id}
-												className={`rounded-xl border p-1.5 transition-colors ${
-													hostConnection
-														? 'remote-connected-item bg-emerald-500/[0.035]'
-														: hostActive
-															? 'border-white/[0.14] bg-white/[0.05]'
-															: 'border-white/[0.06] bg-white/[0.025]'
-												}`}
-											>
-												<div className="flex items-center gap-0.5">
-													<button
-														type="button"
-														title={`${profile.username}@${profile.host}:${normalizePort(profile.port)}`}
-														onClick={() => {
-															if (hostConnection) switchActiveConnection(hostConnection.id);
-														}}
-														disabled={!hostConnection}
-														className={`min-w-0 flex-1 rounded-lg px-2 py-1.5 text-left transition-colors disabled:cursor-default ${
-															hostActive ? 'bg-white/10 text-white' : 'text-white/65'
-														}`}
-													>
-														<span className="block truncate text-[12px] font-medium">{profileLabel(profile)}</span>
-													</button>
-													<RemoteActionButton
-														icon={isProfileRdpOpening ? 'loader' : 'monitor'}
-														label={isProfileRdpOpening ? 'Opening RDP' : 'Open RDP'}
-														spinning={isProfileRdpOpening}
-														onClick={() =>
-															void handleOpenRdp(
-																profile.host,
-																normalizeRdpPort(profile.rdpPort),
-																profileRdpKey,
-																profile,
-															)
-														}
-														disabled={!profile.host.trim() || (!!rdpOpeningTarget && !isProfileRdpOpening)}
-													/>
-													<RemoteActionButton
-														icon={isProfileWinRmRunning ? 'loader' : 'gear'}
-														label={isProfileWinRmRunning ? 'Running SSH setup via WinRM' : 'Run SSH setup via WinRM'}
-														spinning={isProfileWinRmRunning}
-														onClick={() =>
-															void handleRunOpenSshSetupViaWinRm({
-																key: profileWinRmKey,
-																label: profileLabel(profile),
-																host: profile.host,
-																username: profile.username,
-																password: profile.password,
-																sshPort: profile.port,
-															})
-														}
-														disabled={!!winRmBusyTargetKey && !isProfileWinRmRunning}
-													/>
-													<RemoteActionButton
-														icon={hostConnection ? 'plug-off' : isProfileConnecting ? 'loader' : 'plug'}
-														label={hostConnection ? 'Disconnect' : isProfileConnecting ? 'Connecting' : 'Connect'}
-														tone={hostConnection ? 'danger' : 'default'}
-														spinning={isProfileConnecting}
-														onClick={() => {
-															if (hostConnection) void handleDisconnect(hostConnection.id);
-															else {
-																applyProfile(profile);
-																void handleConnect(profile);
-															}
-														}}
-														disabled={isConnecting && !isProfileConnecting}
-													/>
-													<RemoteActionButton
-														icon="pencil"
-														label="Edit"
-														onClick={() => {
-															applyProfile(profile);
-															setConfigOpen(true);
-														}}
-													/>
-													<RemoteActionButton
-														icon="trash"
-														label="Delete"
-														tone="danger"
-														onClick={() => void handleDeleteProfile(profile)}
-													/>
-												</div>
-
-												{hostConnection && hostVms.length > 0 && (
-													<div className="mt-1.5">
-														<button
-															type="button"
-															onClick={() =>
-																hostConnection &&
-																setHypervExpanded((prev) => ({ ...prev, [hostConnection.id]: !vmsExpanded }))
-															}
-															className="flex w-full items-center gap-1.5 rounded-lg px-2 py-1 text-left text-[11px] text-white/45 transition-colors hover:bg-white/[0.04] hover:text-white/70"
-														>
-															<span className="w-3 text-center text-[10px] text-white/25">
-																{vmsExpanded ? '▾' : '▸'}
-															</span>
-															<span className="min-w-0 flex-1 truncate">Hyper-V · {hostVms.length} VM</span>
-														</button>
-														<AnimatePresence initial={false}>
-															{vmsExpanded && (
-																<motion.div
-																	initial={{ height: 0, opacity: 0 }}
-																	animate={{ height: 'auto', opacity: 1 }}
-																	exit={{ height: 0, opacity: 0 }}
-																	transition={{ duration: 0.18, ease: 'easeInOut' }}
-																	className="overflow-hidden"
-																>
-																	{hostVms.map((vm) => {
-																		const vmHost = pickVmHost(vm);
-																		const vmKey = vmCredentialKey(hostConnection, vm);
-																		const vmPowerKey = `${hostConnection.id}:${vmIdentity(vm)}:power`;
-																		const connectedVm = connections.find(
-																			(connection) =>
-																				connection.kind === 'vm' &&
-																				connection.parentConnectionId === hostConnection.id &&
-																				connection.vmId === vmIdentity(vm),
-																		);
-																		const vmActive = connectedVm?.id === activeConnectionId;
-																		const vmConnecting = connectingVmKey === vmKey;
-																		const vmPowerBusy = vmPowerBusyKey === vmPowerKey;
-																		const vmPowerNextAction = vmPowerAction(vm);
-																		const vmRdpKey = `vm:${hostConnection.id}:${vmIdentity(vm)}`;
-																		const isVmRdpOpening = rdpOpeningTarget === vmRdpKey;
-																		const vmWinRmKey = `vm:${hostConnection.id}:${vmIdentity(vm)}:winrm`;
-																		const isVmWinRmRunning = winRmBusyTargetKey === vmWinRmKey;
-																		const parentProfile = hostProfileForConnection(hostConnection);
-																		const savedVmCredential = findVmCredential(hostConnection, vm, vmHost ?? '');
-																		const vmRdpCredential = savedVmCredential?.username
-																			? savedVmCredential
-																			: parentProfile;
-																		const vmWinRmCredential = savedVmCredential?.username
-																			? savedVmCredential
-																			: parentProfile;
-																		return (
-																			<div
-																				key={vmKey}
-																				className={`mt-0.5 rounded-lg border px-1 py-0.5 transition-colors ${
-																					connectedVm
-																						? 'remote-connected-item border-emerald-400/55 bg-emerald-500/[0.035]'
-																						: vmActive
-																							? 'border-white/[0.12] bg-white/[0.07]'
-																							: 'border-transparent bg-white/[0.025]'
-																				}`}
-																			>
-																				<div className="flex items-center gap-0.5">
-																					<button
-																						type="button"
-																						title={vm.name}
-																						onClick={() => {
-																							if (connectedVm) switchActiveConnection(connectedVm.id);
-																						}}
-																						disabled={!connectedVm}
-																						className={`min-w-0 flex-1 rounded-md px-0.5 py-0.5 text-left transition-colors disabled:cursor-default ${
-																							vmActive ? 'bg-white/10 text-white' : 'text-white/55'
-																						}`}
-																					>
-																						<span className="block truncate whitespace-nowrap text-[11px] font-medium leading-none">
-																							{vm.name}
-																						</span>
-																					</button>
-																					<RemoteActionButton
-																						icon={
-																							vmPowerBusy ? 'loader' : vmPowerNextAction === 'stop' ? 'stop' : 'play'
-																						}
-																						label={
-																							vmPowerBusy
-																								? 'Power state updating'
-																								: vmPowerNextAction === 'stop'
-																									? 'Stop'
-																									: 'Start'
-																						}
-																						size="sm"
-																						tone={vmPowerNextAction === 'stop' ? 'danger' : 'default'}
-																						spinning={vmPowerBusy}
-																						onClick={() => void handleToggleVmPower(hostConnection, vm)}
-																						disabled={vmPowerBusy}
-																					/>
-																					<RemoteActionButton
-																						icon={isVmRdpOpening ? 'loader' : 'monitor'}
-																						label={
-																							isVmRdpOpening
-																								? 'Opening RDP'
-																								: vmHost
-																									? 'Open RDP'
-																									: 'No usable VM IP address'
-																						}
-																						size="sm"
-																						spinning={isVmRdpOpening}
-																						onClick={() =>
-																							void handleOpenRdp(
-																								vmHost ?? '',
-																								normalizeRdpPort(parentProfile?.rdpPort),
-																								vmRdpKey,
-																								vmRdpCredential,
-																							)
-																						}
-																						disabled={!vmHost || (!!rdpOpeningTarget && !isVmRdpOpening)}
-																					/>
-																					<RemoteActionButton
-																						icon={isVmWinRmRunning ? 'loader' : 'gear'}
-																						label={
-																							isVmWinRmRunning
-																								? 'Running SSH setup via WinRM'
-																								: vmHost
-																									? 'Run SSH setup via WinRM'
-																									: 'No usable VM IP address'
-																						}
-																						size="sm"
-																						spinning={isVmWinRmRunning}
-																						onClick={() =>
-																							void handleRunOpenSshSetupViaWinRm({
-																								key: vmWinRmKey,
-																								label: vm.name,
-																								host: vmHost ?? '',
-																								username: vmWinRmCredential?.username,
-																								password: vmWinRmCredential?.password,
-																								sshPort: vmWinRmCredential?.port ?? '22',
-																							})
-																						}
-																						disabled={
-																							!vmHost ||
-																							!vmWinRmCredential?.username ||
-																							!vmWinRmCredential?.password ||
-																							(!!winRmBusyTargetKey && !isVmWinRmRunning)
-																						}
-																					/>
-																					<RemoteActionButton
-																						icon={connectedVm ? 'plug-off' : vmConnecting ? 'loader' : 'plug'}
-																						label={
-																							connectedVm
-																								? 'Disconnect'
-																								: vmConnecting
-																									? 'Connecting'
-																									: vmHost
-																										? 'Connect'
-																										: 'No usable VM IP address'
-																						}
-																						size="sm"
-																						tone={connectedVm ? 'danger' : 'default'}
-																						spinning={vmConnecting}
-																						onClick={() => {
-																							if (connectedVm) void handleDisconnect(connectedVm.id);
-																							else void handleConnectVm(hostConnection, vm);
-																						}}
-																						disabled={!vmHost || (isConnecting && !vmConnecting)}
-																					/>
-																					<RemoteActionButton
-																						icon="pencil"
-																						label="Edit"
-																						size="sm"
-																						onClick={() => handleEditVmCredential(hostConnection, vm)}
-																					/>
-																				</div>
-																			</div>
-																		);
-																	})}
-																</motion.div>
-															)}
-														</AnimatePresence>
-													</div>
-												)}
-											</div>
-										);
-									})}
-								</div>
-							)}
-						</div>
-					</div>
-				</div>
-
-				<div className="flex min-h-0 flex-col gap-3 overflow-hidden">
-					<div className="glass app-card relative flex min-h-0 flex-1 flex-col overflow-hidden">
-						<div className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-white/70 to-transparent" />
-						<div className="flex shrink-0 items-center justify-between border-b border-white/[0.06] px-3.5 py-2">
-							<span className="text-xs font-medium text-white/60">文件系统</span>
-							<span className="min-w-0 truncate text-[10px] text-white/25">
-								{activeConnection ? `${activeConnection.label} · ${activeDiskRoots.length} 个磁盘` : '未选择'}
-							</span>
-						</div>
-						<div className="min-h-0 flex-1 overflow-y-auto px-1.5 py-1.5">
-							{!activeConnection ? (
-								<div className="flex h-full min-h-28 items-center justify-center px-5 text-center text-[12px] text-white/25">
-									从远程机器列表选择机器后显示文件树
-								</div>
-							) : (
-								activeDiskRoots.map((disk) => {
-									const expanded = activeDiskExpanded[disk] ?? true;
-									return (
-										<div key={disk} className="mb-1">
+				<AnimatePresence>
+					{analysisOpen && !analysisMinimized && (
+						<motion.div
+							initial={{ opacity: 0 }}
+							animate={{ opacity: 1 }}
+							exit={{ opacity: 0 }}
+							className="fixed inset-0 z-50 flex items-center justify-center bg-black/55 px-4 backdrop-blur-sm"
+							onMouseDown={minimizeAnalysisModal}
+						>
+							<motion.div
+								initial={{ opacity: 0, scale: 0.96, y: 10 }}
+								animate={{ opacity: 1, scale: 1, y: 0 }}
+								exit={{ opacity: 0, scale: 0.96, y: 10 }}
+								transition={{ duration: 0.18, ease: 'easeOut' }}
+								className="glass app-popover relative flex h-[min(78vh,680px)] w-full max-w-[760px] flex-col overflow-hidden shadow-2xl"
+								onMouseDown={(event) => event.stopPropagation()}
+							>
+								<div className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-white/70 to-transparent" />
+								<div className="flex shrink-0 items-start justify-between gap-3 border-b border-white/[0.06] px-4 py-3">
+									<div className="min-w-0">
+										<div className="text-[11px] text-white/35">Remote File Analysis</div>
+										<h2 className="truncate text-base font-semibold text-white/80">文件内容分析</h2>
+										<div className="mt-1 truncate font-mono text-[11px] text-white/35" title={analysisStatusLabel}>
+											{analysisStatusLabel}
+										</div>
+									</div>
+									<div className="flex shrink-0 items-center gap-2">
+										<div className="relative">
 											<button
 												type="button"
-												onClick={() => toggleDiskRoot(disk)}
-												className="mb-0.5 flex w-full items-center gap-1.5 rounded-lg px-2 py-1 text-left text-white/55 transition-colors hover:bg-white/[0.05] hover:text-white/80"
+												onClick={() => setAnalysisModelOpen((value) => !value)}
+												disabled={providers.length === 0}
+												className="glass app-card-surface app-card-control glass-control flex h-8 min-w-[168px] max-w-[240px] items-center justify-between gap-2 rounded-lg px-2.5 text-left text-[11px] text-white/65 disabled:cursor-not-allowed disabled:opacity-35"
+												title={selectedAnalysisProvider ? selectedAnalysisProvider.model : '请先配置大模型'}
 											>
-												<span className="w-3 text-center text-[10px] text-white/25">{expanded ? '▾' : '▸'}</span>
-												<span className="text-[13px]">💾</span>
-												<span className="min-w-0 flex-1 truncate text-[11px] font-bold">{diskLabel(disk)}</span>
+												<span
+													className="h-1.5 w-1.5 shrink-0 rounded-full"
+													style={{
+														backgroundColor: selectedAnalysisProvider
+															? PROVIDER_LABELS[selectedAnalysisProvider.provider].color
+															: 'rgb(255 255 255 / 0.25)',
+													}}
+												/>
+												<span className="min-w-0 flex-1 truncate">
+													{selectedAnalysisProvider ? selectedAnalysisProvider.name : '选择大模型'}
+												</span>
+												<span className="shrink-0 text-white/30">▾</span>
 											</button>
-											<AnimatePresence initial={false}>
-												{expanded && (
+
+											<AnimatePresence>
+												{analysisModelOpen && providers.length > 0 && (
 													<motion.div
-														initial={{ height: 0, opacity: 0 }}
-														animate={{ height: 'auto', opacity: 1 }}
-														exit={{ height: 0, opacity: 0 }}
-														transition={{ duration: 0.18, ease: 'easeInOut' }}
-														className="overflow-hidden"
+														initial={{ opacity: 0, y: -4 }}
+														animate={{ opacity: 1, y: 0 }}
+														exit={{ opacity: 0, y: -4 }}
+														className="glass app-popover absolute right-0 top-full z-20 mt-2 max-h-64 w-72 overflow-y-auto rounded-xl p-1.5 shadow-2xl"
 													>
-														{(activeTrees[disk] ?? []).map((node) => (
-															<TreeItem
-																key={node.path}
-																node={node}
-																depth={0}
-																selected={selectedFile}
-																analysisSelected={analysisSelectedSet}
-																onSelect={handleSelectFile}
-																onToggle={handleToggle}
-																onToggleAnalysis={handleToggleAnalysisFile}
-															/>
-														))}
+														{providers.map((provider) => {
+															const meta = PROVIDER_LABELS[provider.provider];
+															const selected = selectedAnalysisProvider?.id === provider.id;
+															return (
+																<button
+																	key={provider.id}
+																	type="button"
+																	onClick={() => {
+																		setAnalysisProviderId(provider.id);
+																		setAnalysisModelOpen(false);
+																	}}
+																	className={`flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left transition-colors ${
+																		selected
+																			? 'bg-white/[0.08] text-white'
+																			: 'text-white/55 hover:bg-white/[0.05] hover:text-white/80'
+																	}`}
+																>
+																	<span
+																		className="h-2 w-2 shrink-0 rounded-full"
+																		style={{ backgroundColor: meta.color }}
+																	/>
+																	<span className="min-w-0 flex-1">
+																		<span className="block truncate text-[12px] font-medium">{provider.name}</span>
+																		<span className="block truncate text-[10px] text-white/30">{provider.model}</span>
+																	</span>
+																	<span
+																		className="shrink-0 rounded-md bg-white/[0.04] px-1.5 py-0.5 text-[9px]"
+																		style={{ color: meta.color }}
+																	>
+																		{meta.label}
+																	</span>
+																</button>
+															);
+														})}
 													</motion.div>
 												)}
 											</AnimatePresence>
 										</div>
-									);
-								})
-							)}
-						</div>
-					</div>
-
-					<div
-						className={`glass app-card relative shrink-0 overflow-hidden transition-[height] duration-200 ${
-							winRmTerminalOpen ? 'h-48' : 'h-10'
-						}`}
-					>
-						<div className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-white/60 to-transparent" />
-						<div className="flex h-10 items-center gap-2 border-b border-white/[0.05] px-3">
-							<button
-								type="button"
-								onClick={() => setWinRmTerminalOpen((value) => !value)}
-								className="flex min-w-0 flex-1 items-center gap-1.5 text-left text-[11px] font-medium text-white/55 transition-colors hover:text-white/80"
-							>
-								<span className="w-3 text-center text-[10px] text-white/30">{winRmTerminalOpen ? '▾' : '▸'}</span>
-								<Icon name="gear" className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-								<span className="min-w-0 flex-1 truncate">WinRM SSH Setup</span>
-							</button>
-							<span
-								className={`shrink-0 rounded-md px-1.5 py-0.5 text-[10px] ${
-									winRmTerminalStatus === 'running'
-										? 'bg-sky-400/10 text-sky-200'
-										: winRmTerminalStatus === 'done'
-											? 'bg-emerald-400/10 text-emerald-200'
-											: winRmTerminalStatus === 'error'
-												? 'bg-rose-500/10 text-rose-300'
-												: 'bg-white/[0.04] text-white/30'
-								}`}
-							>
-								{winRmTerminalStatus === 'running'
-									? 'Running'
-									: winRmTerminalStatus === 'done'
-										? 'Done'
-										: winRmTerminalStatus === 'error'
-											? 'Failed'
-											: 'Ready'}
-							</span>
-							{winRmTerminalLines.length > 0 && (
-								<button
-									type="button"
-									onClick={() => {
-										setWinRmTerminalLines([]);
-										if (!winRmBusyTargetKey) setWinRmTerminalStatus('idle');
-									}}
-									className="shrink-0 rounded-md px-1.5 py-0.5 text-[10px] text-white/30 transition-colors hover:bg-white/[0.05] hover:text-white/60"
-								>
-									Clear
-								</button>
-							)}
-						</div>
-						{winRmTerminalOpen && (
-							<div
-								ref={winRmTerminalScrollRef}
-								className="remote-file-scrollbar h-[calc(100%-2.5rem)] overflow-y-auto bg-white/[0.22] px-3 py-2 font-mono text-[11px] font-medium leading-relaxed"
-							>
-								{winRmTerminalLines.length === 0 ? (
-									<div className="py-8 text-center text-slate-500">No WinRM output</div>
-								) : (
-									winRmTerminalLines.map((line) => (
-										<div
-											key={line.id}
-											className={`whitespace-pre-wrap break-words ${
-												line.stream === 'stderr' || line.stream === 'error'
-													? 'text-rose-700'
-													: line.stream === 'status'
-														? 'text-cyan-700'
-														: 'text-slate-800'
-											}`}
+										<button
+											type="button"
+											onClick={() => void startFileAnalysis()}
+											disabled={!currentTargetsAnalyzing && !canStartAnalysis}
+											title={analysisStartTitle}
+											className="h-8 rounded-lg px-3 text-xs font-medium text-white transition-all disabled:cursor-not-allowed disabled:opacity-35"
+											style={{
+												background: currentTargetsAnalyzing ? 'rgb(244 63 94 / 0.16)' : 'rgb(var(--accent-rgb) / 0.14)',
+												border: currentTargetsAnalyzing
+													? '1px solid rgb(244 63 94 / 0.35)'
+													: '1px solid rgb(var(--accent-rgb) / 0.3)',
+											}}
 										>
-											{line.text}
+											{currentTargetsAnalyzing ? 'Stop' : 'Start'}
+										</button>
+									</div>
+								</div>
+
+								<div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
+									{providers.length === 0 ? (
+										<div className="flex h-full min-h-52 flex-col items-center justify-center gap-2 text-center text-white/30">
+											<Icon name="chat" className="h-8 w-8 text-white/20" aria-hidden="true" />
+											<div className="text-sm text-white/45">暂无可用大模型</div>
+											<div className="max-w-sm text-[11px] leading-relaxed text-white/25">
+												请先在设置页面添加 Model Provider，然后回到这里选择模型进行分析。
+											</div>
 										</div>
-									))
+									) : analysisError ? (
+										<div className="rounded-xl bg-rose-500/10 px-3 py-2 text-[12px] leading-relaxed text-rose-300">
+											{analysisError}
+										</div>
+									) : analysisResults.length > 0 ? (
+										<div className="space-y-3">
+											{analysisResults.map((result) => {
+												const active = result.status === 'pending' || result.status === 'running';
+												const languageContent = getAnalysisLanguageContent(result.output, result.language);
+												const statusText =
+													result.status === 'pending'
+														? '等待中'
+														: result.status === 'running'
+															? '分析中'
+															: result.status === 'done'
+																? '完成'
+																: result.status === 'aborted'
+																	? '已停止'
+																	: '失败';
+												const statusClass =
+													result.status === 'error'
+														? 'bg-rose-500/10 text-rose-300'
+														: active
+															? 'bg-sky-400/10 text-sky-200'
+															: 'bg-emerald-400/10 text-emerald-200';
+
+												return (
+													<div
+														key={result.path}
+														className="overflow-hidden rounded-xl border border-white/[0.06] bg-white/[0.025]"
+													>
+														<div className="flex items-center gap-2 border-b border-white/[0.05] px-3 py-2">
+															{active && (
+																<Icon
+																	name="loader"
+																	className="h-3.5 w-3.5 shrink-0 animate-spin text-white/35"
+																	aria-hidden="true"
+																/>
+															)}
+															<span
+																className="min-w-0 flex-1 truncate font-mono text-[11px] text-white/45"
+																title={result.displayPath}
+															>
+																{result.displayPath}
+															</span>
+															<div className="flex shrink-0 overflow-hidden rounded-md bg-white/[0.04] p-0.5 ring-1 ring-white/[0.06]">
+																{(['en', 'ch'] as AnalysisLanguage[]).map((language) => (
+																	<button
+																		key={language}
+																		type="button"
+																		onClick={() => updateAnalysisResult(result.path, (item) => ({ ...item, language }))}
+																		className={`h-5 min-w-8 rounded px-1.5 text-[10px] font-medium transition-colors ${
+																			result.language === language
+																				? 'bg-white/[0.1] text-white/80'
+																				: 'text-white/35 hover:text-white/65'
+																		}`}
+																	>
+																		{language === 'en' ? 'EN' : 'CH'}
+																	</button>
+																))}
+															</div>
+															{result.isFilteredLog && (
+																<span className="shrink-0 rounded-md bg-sky-400/10 px-1.5 py-0.5 text-[10px] text-sky-200">
+																	CMTrace
+																</span>
+															)}
+															<span className={`shrink-0 rounded-md px-1.5 py-0.5 text-[10px] ${statusClass}`}>
+																{statusText}
+															</span>
+														</div>
+														<div className="select-text px-3.5 py-3">
+															{result.error ? (
+																<div className="rounded-lg bg-rose-500/10 px-3 py-2 text-[12px] leading-relaxed text-rose-300">
+																	{result.error}
+																</div>
+															) : result.output ? (
+																languageContent.content ? (
+																	<MarkdownContent content={languageContent.content} />
+																) : (
+																	<div className="py-6 text-center text-[12px] text-white/30">
+																		{result.status === 'done'
+																			? `模型未返回 ${result.language === 'en' ? 'EN' : 'CH'} 结果`
+																			: `${result.language === 'en' ? 'EN' : 'CH'} 结果生成中…`}
+																	</div>
+																)
+															) : (
+																<div className="py-6 text-center text-[12px] text-white/30">{result.statusDetail}</div>
+															)}
+														</div>
+													</div>
+												);
+											})}
+										</div>
+									) : (
+										<div className="flex h-full min-h-52 flex-col items-center justify-center gap-2 text-center text-white/30">
+											<Icon name="chat" className="h-8 w-8 text-white/20" aria-hidden="true" />
+											<div className="text-sm text-white/45">点击 Start 开始分析文件</div>
+											<div className="max-w-md text-[11px] leading-relaxed text-white/25">
+												勾选多个文件时，每个文件会作为独立分析任务并行执行。
+											</div>
+										</div>
+									)}
+									{isAnalyzing && (
+										<div className="mt-3 flex items-center gap-2 text-[11px] text-white/35">
+											<Icon name="loader" className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+											{analysisTargetPaths.length > 1 ? '多文件并行分析中…' : '分析中…'}
+										</div>
+									)}
+								</div>
+
+								{totalAnalysisStats && (
+									<div className="flex shrink-0 items-center justify-end gap-3 border-t border-white/[0.05] px-4 py-2 text-[10px] text-white/30">
+										<span>Input {totalAnalysisStats.promptTokens.toLocaleString()}</span>
+										<span>Output {totalAnalysisStats.completionTokens.toLocaleString()}</span>
+										<span>{totalAnalysisStats.outputTps.toFixed(1)} tok/s</span>
+									</div>
+								)}
+							</motion.div>
+						</motion.div>
+					)}
+				</AnimatePresence>
+
+				<AnimatePresence>
+					{analysisOpen && analysisMinimized && (
+						<motion.button
+							type="button"
+							initial={{ opacity: 0, y: 12 }}
+							animate={{ opacity: 1, y: 0 }}
+							exit={{ opacity: 0, y: 12 }}
+							transition={{ duration: 0.18, ease: 'easeOut' }}
+							onClick={restoreAnalysisModal}
+							className="glass app-popover fixed bottom-4 right-16 z-50 flex max-w-[min(360px,calc(100vw-6rem))] items-center gap-2 rounded-xl px-3 py-2 text-left shadow-2xl transition-colors hover:bg-white/[0.08]"
+							title="恢复文件内容分析窗口"
+						>
+							{isAnalyzing ? (
+								<Icon name="loader" className="h-4 w-4 shrink-0 animate-spin text-white/45" aria-hidden="true" />
+							) : (
+								<Icon name="chat" className="h-4 w-4 shrink-0 text-white/35" aria-hidden="true" />
+							)}
+							<span className="min-w-0 flex-1">
+								<span className="block text-[12px] font-medium text-white/70">
+									{isAnalyzing
+										? '文件分析中'
+										: analysisError
+											? '分析出错'
+											: analysisResults.length > 0
+												? '分析结果'
+												: '文件内容分析'}
+								</span>
+								<span className="block truncate font-mono text-[10px] text-white/35">{analysisStatusLabel}</span>
+							</span>
+						</motion.button>
+					)}
+				</AnimatePresence>
+
+				<div className="grid h-full min-h-0 flex-1 grid-cols-[304px_304px_minmax(0,1fr)] gap-3 overflow-hidden">
+					<div className="flex min-h-0 flex-col overflow-hidden">
+						<div className="glass app-card relative flex min-h-0 flex-1 flex-col overflow-hidden">
+							<div className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-white/70 to-transparent" />
+							<div className="flex shrink-0 items-center justify-between border-b border-white/[0.06] px-3.5 py-2">
+								<span className="text-xs font-medium text-white/60">机器列表</span>
+								<span className="text-[10px] text-white/25">{profiles.length} 台</span>
+							</div>
+							<div className="min-h-0 flex-1 overflow-y-auto p-2">
+								{profiles.length === 0 ? (
+									<div className="flex h-full min-h-24 flex-col items-center justify-center gap-1 text-center text-white/25">
+										<span className="text-sm">暂无配置</span>
+										<span className="text-[11px]">点击右上角 + 添加，或导入 JSON</span>
+									</div>
+								) : (
+									<div className="space-y-1.5">
+										{profiles.map((profile) => {
+											const isProfileConnecting = connectingProfileId === profile.id;
+											const profileWinRmKey = `host:${profile.id}:winrm`;
+											const isProfileWinRmRunning = winRmBusyTargetKey === profileWinRmKey;
+											const profileRdpKey = `host:${profile.id}`;
+											const isProfileRdpOpening = rdpOpeningTarget === profileRdpKey;
+											const hostConnection =
+												hostConnections.find((connection) => connection.parentProfileId === profile.id) ?? null;
+											const hostActive = activeConnectionId === hostConnection?.id;
+											const hostVms = hostConnection ? (connectionHypervVms[hostConnection.id] ?? []) : [];
+											const vmsExpanded = hostConnection ? (hypervExpanded[hostConnection.id] ?? true) : false;
+											return (
+												<div
+													key={profile.id}
+													className={`rounded-xl border p-1.5 transition-colors ${
+														hostConnection
+															? 'remote-connected-item bg-emerald-500/[0.035]'
+															: hostActive
+																? 'border-white/[0.14] bg-white/[0.05]'
+																: 'border-white/[0.06] bg-white/[0.025]'
+													}`}
+												>
+													<div className="flex items-center gap-0.5">
+														<button
+															type="button"
+															title={`${profile.username}@${profile.host}:${normalizePort(profile.port)}`}
+															onClick={() => {
+																if (hostConnection) switchActiveConnection(hostConnection.id);
+															}}
+															disabled={!hostConnection}
+															className={`min-w-0 flex-1 rounded-lg px-2 py-1.5 text-left transition-colors disabled:cursor-default ${
+																hostActive ? 'bg-white/10 text-white' : 'text-white/65'
+															}`}
+														>
+															<span className="flex items-center gap-1.5">
+																{hostConnection && (
+																	<span
+																		className={`inline-block h-2 w-2 shrink-0 rounded-full ${
+																			connectionHealth[hostConnection.id] === 'healthy'
+																				? 'bg-emerald-400 animate-pulse'
+																				: connectionHealth[hostConnection.id] === 'reconnecting'
+																					? 'bg-amber-400 animate-pulse'
+																					: connectionHealth[hostConnection.id] === 'unhealthy'
+																						? 'bg-rose-400'
+																						: connectionHealth[hostConnection.id] === 'checking'
+																							? 'bg-blue-400 animate-pulse'
+																							: 'bg-emerald-400/50'
+																		}`}
+																		title={
+																			connectionHealth[hostConnection.id] === 'healthy'
+																				? '连接正常'
+																				: connectionHealth[hostConnection.id] === 'reconnecting'
+																					? '正在重连…'
+																					: connectionHealth[hostConnection.id] === 'unhealthy'
+																						? '连接异常'
+																						: connectionHealth[hostConnection.id] === 'checking'
+																							? '检测中…'
+																							: '已连接'
+																		}
+																	/>
+																)}
+																<span className="block truncate text-[12px] font-medium">{profileLabel(profile)}</span>
+															</span>
+														</button>
+														<RemoteActionButton
+															icon={isProfileRdpOpening ? 'loader' : 'monitor'}
+															label={isProfileRdpOpening ? 'Opening RDP' : 'Open RDP'}
+															spinning={isProfileRdpOpening}
+															onClick={() =>
+																void handleOpenRdp(
+																	profile.host,
+																	normalizeRdpPort(profile.rdpPort),
+																	profileRdpKey,
+																	profile,
+																)
+															}
+															disabled={!profile.host.trim() || (!!rdpOpeningTarget && !isProfileRdpOpening)}
+														/>
+														<RemoteActionButton
+															icon={isProfileWinRmRunning ? 'loader' : 'gear'}
+															label={isProfileWinRmRunning ? 'Running SSH setup via WinRM' : 'Run SSH setup via WinRM'}
+															spinning={isProfileWinRmRunning}
+															onClick={() =>
+																void handleRunOpenSshSetupViaWinRm({
+																	key: profileWinRmKey,
+																	label: profileLabel(profile),
+																	host: profile.host,
+																	username: profile.username,
+																	password: profile.password,
+																	sshPort: profile.port,
+																})
+															}
+															disabled={!!winRmBusyTargetKey && !isProfileWinRmRunning}
+														/>
+														<RemoteActionButton
+															icon={hostConnection ? 'plug-off' : isProfileConnecting ? 'loader' : 'plug'}
+															label={hostConnection ? 'Disconnect' : isProfileConnecting ? 'Connecting' : 'Connect'}
+															tone={hostConnection ? 'danger' : 'default'}
+															spinning={isProfileConnecting}
+															onClick={() => {
+																if (hostConnection) void handleDisconnect(hostConnection.id);
+																else {
+																	applyProfile(profile);
+																	void handleConnect(profile);
+																}
+															}}
+															disabled={isConnecting && !isProfileConnecting}
+														/>
+														<RemoteActionButton
+															icon="pencil"
+															label="Edit"
+															onClick={() => {
+																applyProfile(profile);
+																setConfigOpen(true);
+															}}
+														/>
+														<RemoteActionButton
+															icon="trash"
+															label="Delete"
+															tone="danger"
+															onClick={() => void handleDeleteProfile(profile)}
+														/>
+													</div>
+
+													{hostConnection && hostVms.length > 0 && (
+														<div className="mt-1.5">
+															<button
+																type="button"
+																onClick={() =>
+																	hostConnection &&
+																	setHypervExpanded((prev) => ({ ...prev, [hostConnection.id]: !vmsExpanded }))
+																}
+																className="flex w-full items-center gap-1.5 rounded-lg px-2 py-1 text-left text-[11px] text-white/45 transition-colors hover:bg-white/[0.04] hover:text-white/70"
+															>
+																<span className="w-3 text-center text-[10px] text-white/25">
+																	{vmsExpanded ? '▾' : '▸'}
+																</span>
+																<span className="min-w-0 flex-1 truncate">Hyper-V · {hostVms.length} VM</span>
+															</button>
+															<AnimatePresence initial={false}>
+																{vmsExpanded && (
+																	<motion.div
+																		initial={{ height: 0, opacity: 0 }}
+																		animate={{ height: 'auto', opacity: 1 }}
+																		exit={{ height: 0, opacity: 0 }}
+																		transition={{ duration: 0.18, ease: 'easeInOut' }}
+																		className="overflow-hidden"
+																	>
+																		{hostVms.map((vm) => {
+																			const vmHost = pickVmHost(vm);
+																			const vmKey = vmCredentialKey(hostConnection, vm);
+																			const vmPowerKey = `${hostConnection.id}:${vmIdentity(vm)}:power`;
+																			const connectedVm = connections.find(
+																				(connection) =>
+																					connection.kind === 'vm' &&
+																					connection.parentConnectionId === hostConnection.id &&
+																					connection.vmId === vmIdentity(vm),
+																			);
+																			const vmActive = connectedVm?.id === activeConnectionId;
+																			const vmConnecting = connectingVmKey === vmKey;
+																			const vmPowerBusy = vmPowerBusyKey === vmPowerKey;
+																			const vmPowerNextAction = vmPowerAction(vm);
+																			const vmRdpKey = `vm:${hostConnection.id}:${vmIdentity(vm)}`;
+																			const isVmRdpOpening = rdpOpeningTarget === vmRdpKey;
+																			const vmWinRmKey = `vm:${hostConnection.id}:${vmIdentity(vm)}:winrm`;
+																			const isVmWinRmRunning = winRmBusyTargetKey === vmWinRmKey;
+																			const parentProfile = hostProfileForConnection(hostConnection);
+																			const savedVmCredential = findVmCredential(hostConnection, vm, vmHost ?? '');
+																			const vmRdpCredential = savedVmCredential?.username
+																				? savedVmCredential
+																				: parentProfile;
+																			const vmWinRmCredential = savedVmCredential?.username
+																				? savedVmCredential
+																				: parentProfile;
+																			return (
+																				<div
+																					key={vmKey}
+																					className={`mt-0.5 rounded-lg border px-1 py-0.5 transition-colors ${
+																						connectedVm
+																							? 'remote-connected-item border-emerald-400/55 bg-emerald-500/[0.035]'
+																							: vmActive
+																								? 'border-white/[0.12] bg-white/[0.07]'
+																								: 'border-transparent bg-white/[0.025]'
+																					}`}
+																				>
+																					<div className="flex items-center gap-0.5">
+																						<button
+																							type="button"
+																							title={vm.name}
+																							onClick={() => {
+																								if (connectedVm) switchActiveConnection(connectedVm.id);
+																							}}
+																							disabled={!connectedVm}
+																							className={`min-w-0 flex-1 rounded-md px-0.5 py-0.5 text-left transition-colors disabled:cursor-default ${
+																								vmActive ? 'bg-white/10 text-white' : 'text-white/55'
+																							}`}
+																						>
+																							<span className="block truncate whitespace-nowrap text-[11px] font-medium leading-none">
+																								{vm.name}
+																							</span>
+																						</button>
+																						<RemoteActionButton
+																							icon={
+																								vmPowerBusy ? 'loader' : vmPowerNextAction === 'stop' ? 'stop' : 'play'
+																							}
+																							label={
+																								vmPowerBusy
+																									? 'Power state updating'
+																									: vmPowerNextAction === 'stop'
+																										? 'Stop'
+																										: 'Start'
+																							}
+																							size="sm"
+																							tone={vmPowerNextAction === 'stop' ? 'danger' : 'default'}
+																							spinning={vmPowerBusy}
+																							onClick={() => void handleToggleVmPower(hostConnection, vm)}
+																							disabled={vmPowerBusy}
+																						/>
+																						<RemoteActionButton
+																							icon={isVmRdpOpening ? 'loader' : 'monitor'}
+																							label={
+																								isVmRdpOpening
+																									? 'Opening RDP'
+																									: vmHost
+																										? 'Open RDP'
+																										: 'No usable VM IP address'
+																							}
+																							size="sm"
+																							spinning={isVmRdpOpening}
+																							onClick={() =>
+																								void handleOpenRdp(
+																									vmHost ?? '',
+																									normalizeRdpPort(parentProfile?.rdpPort),
+																									vmRdpKey,
+																									vmRdpCredential,
+																								)
+																							}
+																							disabled={!vmHost || (!!rdpOpeningTarget && !isVmRdpOpening)}
+																						/>
+																						<RemoteActionButton
+																							icon={isVmWinRmRunning ? 'loader' : 'gear'}
+																							label={
+																								isVmWinRmRunning
+																									? 'Running SSH setup via WinRM'
+																									: vmHost
+																										? 'Run SSH setup via WinRM'
+																										: 'No usable VM IP address'
+																							}
+																							size="sm"
+																							spinning={isVmWinRmRunning}
+																							onClick={() =>
+																								void handleRunOpenSshSetupViaWinRm({
+																									key: vmWinRmKey,
+																									label: vm.name,
+																									host: vmHost ?? '',
+																									username: vmWinRmCredential?.username,
+																									password: vmWinRmCredential?.password,
+																									sshPort: vmWinRmCredential?.port ?? '22',
+																								})
+																							}
+																							disabled={
+																								!vmHost ||
+																								!vmWinRmCredential?.username ||
+																								!vmWinRmCredential?.password ||
+																								(!!winRmBusyTargetKey && !isVmWinRmRunning)
+																							}
+																						/>
+																						<RemoteActionButton
+																							icon={connectedVm ? 'plug-off' : vmConnecting ? 'loader' : 'plug'}
+																							label={
+																								connectedVm
+																									? 'Disconnect'
+																									: vmConnecting
+																										? 'Connecting'
+																										: vmHost
+																											? 'Connect'
+																											: 'No usable VM IP address'
+																							}
+																							size="sm"
+																							tone={connectedVm ? 'danger' : 'default'}
+																							spinning={vmConnecting}
+																							onClick={() => {
+																								if (connectedVm) void handleDisconnect(connectedVm.id);
+																								else void handleConnectVm(hostConnection, vm);
+																							}}
+																							disabled={!vmHost || (isConnecting && !vmConnecting)}
+																						/>
+																						<RemoteActionButton
+																							icon="pencil"
+																							label="Edit"
+																							size="sm"
+																							onClick={() => handleEditVmCredential(hostConnection, vm)}
+																						/>
+																					</div>
+																				</div>
+																			);
+																		})}
+																	</motion.div>
+																)}
+															</AnimatePresence>
+														</div>
+													)}
+												</div>
+											);
+										})}
+									</div>
 								)}
 							</div>
-						)}
+						</div>
 					</div>
-				</div>
 
-				{/* ── 文件内容 ──────────────────────────────────────────────── */}
-				<div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
-					<AnimatePresence mode="wait">
-						{selectedFile ? (
-							<motion.div
-								key={`${activeConnectionId ?? 'none'}:${selectedFile}`}
-								initial={{ opacity: 0, x: 12 }}
-								animate={{ opacity: 1, x: 0 }}
-								exit={{ opacity: 0 }}
-								transition={{ duration: 0.2 }}
-								className="glass app-card relative flex h-full min-h-0 flex-col overflow-hidden"
+					<div className="flex min-h-0 flex-col gap-3 overflow-hidden">
+						<div className="glass app-card relative flex min-h-0 flex-1 flex-col overflow-hidden">
+							<div className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-white/70 to-transparent" />
+							<div className="flex shrink-0 items-center justify-between border-b border-white/[0.06] px-3.5 py-2">
+								<span className="text-xs font-medium text-white/60">文件系统</span>
+								<span className="min-w-0 truncate text-[10px] text-white/25">
+									{activeConnection ? `${activeConnection.label} · ${activeDiskRoots.length} 个磁盘` : '未选择'}
+								</span>
+							</div>
+							{/* 快速路径跳转输入 */}
+							{activeConnection && (
+								<div className="shrink-0 border-b border-white/[0.04] px-2.5 py-1.5">
+									<input
+										type="text"
+										placeholder="输入路径快速跳转… (如 C:\Logs)"
+										className="w-full rounded-lg bg-white/[0.03] px-2.5 py-1 text-[11px] text-white/70 placeholder:text-white/20 ring-1 ring-white/[0.06] focus:outline-none focus:ring-white/[0.15]"
+										spellCheck={false}
+										onKeyDown={(e) => {
+											if (e.key !== 'Enter') return;
+											const input = (e.target as HTMLInputElement).value.trim();
+											if (!input || !activeConnectionId) return;
+											// 将 Windows 路径转为 SFTP 路径
+											const sftpPath = input.replace(/\\/g, '/').replace(/^([A-Za-z]):/, '/$1:');
+											void handleSelectFile({
+												path: sftpPath,
+												name: remoteFileName(sftpPath),
+												is_dir: false,
+												size: null,
+												children: null,
+												expanded: false,
+											} as TreeNode);
+											(e.target as HTMLInputElement).value = '';
+										}}
+									/>
+								</div>
+							)}
+							<div className="min-h-0 flex-1 overflow-y-auto px-1.5 py-1.5">
+								{!activeConnection ? (
+									<div className="flex h-full min-h-28 items-center justify-center px-5 text-center text-[12px] text-white/25">
+										从远程机器列表选择机器后显示文件树
+									</div>
+								) : (
+									activeDiskRoots.map((disk) => {
+										const expanded = activeDiskExpanded[disk] ?? true;
+										return (
+											<div key={disk} className="mb-1">
+												<button
+													type="button"
+													onClick={() => toggleDiskRoot(disk)}
+													className="mb-0.5 flex w-full items-center gap-1.5 rounded-lg px-2 py-1 text-left text-white/55 transition-colors hover:bg-white/[0.05] hover:text-white/80"
+												>
+													<span className="w-3 text-center text-[10px] text-white/25">{expanded ? '▾' : '▸'}</span>
+													<span className="text-[13px]">💾</span>
+													<span className="min-w-0 flex-1 truncate text-[11px] font-bold">{diskLabel(disk)}</span>
+												</button>
+												<AnimatePresence initial={false}>
+													{expanded && (
+														<motion.div
+															initial={{ height: 0, opacity: 0 }}
+															animate={{ height: 'auto', opacity: 1 }}
+															exit={{ height: 0, opacity: 0 }}
+															transition={{ duration: 0.18, ease: 'easeInOut' }}
+															className="overflow-hidden"
+														>
+															{(activeTrees[disk] ?? []).map((node) => (
+																<TreeItem
+																	key={node.path}
+																	node={node}
+																	depth={0}
+																	selected={selectedFile}
+																	analysisSelected={analysisSelectedSet}
+																	onSelect={handleSelectFile}
+																	onToggle={handleToggle}
+																	onToggleAnalysis={handleToggleAnalysisFile}
+																	onContextMenu={handleTreeContextMenu}
+																/>
+															))}
+														</motion.div>
+													)}
+												</AnimatePresence>
+											</div>
+										);
+									})
+								)}
+							</div>
+							{treeActionMsg && (
+								<div className="pointer-events-none absolute bottom-3 left-1/2 z-20 -translate-x-1/2 rounded-lg bg-black/35 px-3 py-1 text-[11px] text-white/70 ring-1 ring-white/[0.08] backdrop-blur">
+									{treeActionMsg}
+								</div>
+							)}
+						</div>
+
+						<div
+							className={`glass app-card relative shrink-0 overflow-hidden transition-[height] duration-200 ${
+								winRmTerminalOpen ? 'h-48' : 'h-10'
+							}`}
+						>
+							<div className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-white/60 to-transparent" />
+							<div className="flex h-10 items-center gap-2 border-b border-white/[0.05] px-3">
+								<button
+									type="button"
+									onClick={() => setWinRmTerminalOpen((value) => !value)}
+									className="flex min-w-0 flex-1 items-center gap-1.5 text-left text-[11px] font-medium text-white/55 transition-colors hover:text-white/80"
+								>
+									<span className="w-3 text-center text-[10px] text-white/30">{winRmTerminalOpen ? '▾' : '▸'}</span>
+									<Icon name="gear" className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+									<span className="min-w-0 flex-1 truncate">连接日志</span>
+								</button>
+								<span
+									className={`shrink-0 rounded-md px-1.5 py-0.5 text-[10px] ${
+										winRmTerminalStatus === 'running'
+											? 'bg-sky-500/15 text-sky-600'
+											: winRmTerminalStatus === 'done'
+												? 'bg-emerald-500/15 text-emerald-600'
+												: winRmTerminalStatus === 'error'
+													? 'bg-rose-500/15 text-rose-600'
+													: 'bg-white/[0.06] text-white/50'
+									}`}
+								>
+									{winRmTerminalStatus === 'running'
+										? 'Running'
+										: winRmTerminalStatus === 'done'
+											? 'Done'
+											: winRmTerminalStatus === 'error'
+												? 'Failed'
+												: 'Ready'}
+								</span>
+								{winRmTerminalLines.length > 0 && (
+									<button
+										type="button"
+										onClick={() => {
+											setWinRmTerminalLines([]);
+											if (!winRmBusyTargetKey) setWinRmTerminalStatus('idle');
+										}}
+										className="shrink-0 rounded-md px-1.5 py-0.5 text-[10px] text-white/50 transition-colors hover:bg-white/[0.08] hover:text-white/70"
+									>
+										Clear
+									</button>
+								)}
+							</div>
+							{winRmTerminalOpen && (
+								<div
+									ref={winRmTerminalScrollRef}
+									className="remote-file-scrollbar h-[calc(100%-2.5rem)] overflow-y-auto bg-white/[0.22] px-3 py-2 font-mono text-[11px] font-medium leading-relaxed"
+								>
+									{winRmTerminalLines.length === 0 ? (
+										<div className="py-8 text-center text-slate-500">No WinRM output</div>
+									) : (
+										winRmTerminalLines.map((line) => (
+											<div
+												key={line.id}
+												className={`whitespace-pre-wrap break-words ${
+													line.stream === 'stderr' || line.stream === 'error'
+														? 'text-rose-700'
+														: line.stream === 'status'
+															? 'text-cyan-700'
+															: 'text-slate-800'
+												}`}
+											>
+												{line.text}
+											</div>
+										))
+									)}
+								</div>
+							)}
+						</div>
+					</div>
+
+					{/* ── 右侧面板（文件内容 / Terminal） ──────────────────────── */}
+					<div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+						{/* Tab 栏 */}
+						<div className="flex shrink-0 items-center gap-1 border-b border-white/[0.06] px-3 py-1.5">
+							<button
+								type="button"
+								onClick={() => setRightPanelTab('file')}
+								className={`flex items-center gap-1.5 rounded-md px-3 py-1 text-[12px] font-medium transition-colors ${
+									rightPanelTab === 'file' ? 'bg-white/[0.10] text-white/85' : 'text-white/35 hover:text-white/65'
+								}`}
 							>
+								<svg
+									viewBox="0 0 24 24"
+									className="h-3.5 w-3.5"
+									fill="none"
+									stroke="currentColor"
+									strokeWidth="1.8"
+									strokeLinecap="round"
+								>
+									<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+									<polyline points="14 2 14 8 20 8" />
+								</svg>
+								文件内容
+							</button>
+							<button
+								type="button"
+								onClick={() => setRightPanelTab('terminal')}
+								className={`flex items-center gap-1.5 rounded-md px-3 py-1 text-[12px] font-medium transition-colors ${
+									rightPanelTab === 'terminal' ? 'bg-white/[0.10] text-white/85' : 'text-white/35 hover:text-white/65'
+								}`}
+							>
+								<svg
+									viewBox="0 0 24 24"
+									className="h-3.5 w-3.5"
+									fill="none"
+									stroke="currentColor"
+									strokeWidth="1.8"
+									strokeLinecap="round"
+								>
+									<polyline points="4 17 10 11 4 5" />
+									<line x1="12" y1="19" x2="20" y2="19" />
+								</svg>
+								Terminal
+							</button>
+						</div>
+
+						{/* ── Terminal 面板 ───────────────────────────────────── */}
+						{rightPanelTab === 'terminal' && (
+							<div className="glass app-card relative flex h-full min-h-0 flex-col overflow-hidden">
 								<div
 									className="pointer-events-none absolute inset-x-0 top-0 h-px
                 bg-gradient-to-r from-transparent via-white/70 to-transparent"
 								/>
-
-								{/* 工具栏 */}
+								{/* 工作目录显示 */}
+								{activeConnection && sshTerminalCwd && (
+									<div className="shrink-0 border-b border-white/[0.05] px-4 py-1.5">
+										<span className="select-none font-mono text-[11px] text-white/50">
+											{sftpToDisplay(sshTerminalCwd)}
+										</span>
+									</div>
+								)}
+								{/* 输出区 */}
 								<div
-									className="flex shrink-0 items-center gap-2
-                border-b border-white/[0.06] px-4 py-2.5"
+									ref={sshTerminalScrollRef}
+									className="remote-file-scrollbar min-h-0 flex-1 overflow-y-auto px-4 py-3 font-mono text-[12px] leading-relaxed"
 								>
-									{/* 文件路径 */}
-									<span
-										className="min-w-0 flex-1 truncate font-mono text-[11px] text-white/50"
-										title={sftpToDisplay(selectedFile)}
-									>
-										{sftpToDisplay(selectedFile)}
-									</span>
-
-									{/* 自动刷新 */}
+									{!activeConnection ? (
+										<div className="flex h-full items-center justify-center text-white/20 text-sm">
+											请先连接远程机器
+										</div>
+									) : sshTerminalHistory.length === 0 ? (
+										<div className="text-white/20 text-sm">在下方输入命令并按 Enter 执行…</div>
+									) : (
+										sshTerminalHistory.map((entry) => (
+											<div key={entry.id} className="mb-1">
+												{entry.type === 'input' ? (
+													<div className="text-emerald-600">
+														<span className="mr-2 select-none text-white/55">
+															{entry.cwd ? `${sftpToDisplay(entry.cwd)}>` : '$'}
+														</span>
+														{entry.text}
+													</div>
+												) : entry.type === 'error' ? (
+													<div className="whitespace-pre-wrap break-all text-rose-600">{entry.text}</div>
+												) : (
+													<div className="whitespace-pre-wrap break-all text-white/80">{entry.text}</div>
+												)}
+											</div>
+										))
+									)}
+									{sshTerminalRunning && (
+										<div className="flex items-center gap-2 text-white/30 text-[11px]">
+											<svg
+												className="h-3 w-3 animate-spin"
+												viewBox="0 0 24 24"
+												fill="none"
+												stroke="currentColor"
+												strokeWidth="2"
+											>
+												<path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4" />
+											</svg>
+											执行中…
+										</div>
+									)}
+								</div>
+								{/* 工具栏 */}
+								<div className="flex shrink-0 items-center gap-2 border-t border-white/[0.05] px-3 py-2">
 									<button
 										type="button"
-										onClick={() => setAutoRefresh((v) => !v)}
-										disabled={fileReadError}
-										className={`flex shrink-0 items-center gap-1.5 rounded-lg px-2.5 py-1
+										onClick={() => setSshTerminalHistory([])}
+										className="shrink-0 rounded-md px-2 py-0.5 text-[10px] text-white/30 transition-colors hover:bg-white/[0.05] hover:text-white/60"
+									>
+										Clear
+									</button>
+									<input
+										ref={scriptFileRef}
+										type="file"
+										accept=".ps1,.sh,.bat,.cmd,.py"
+										className="hidden"
+										onChange={(e) => void handleScriptFileSelect(e)}
+									/>
+									<button
+										type="button"
+										onClick={() => scriptFileRef.current?.click()}
+										disabled={!activeConnection || sshTerminalRunning || scriptUploading}
+										title="上传脚本文件并执行（.ps1 / .sh / .bat / .cmd / .py）"
+										className="shrink-0 rounded-md px-2 py-0.5 text-[10px] text-white/30 transition-colors hover:bg-white/[0.05] hover:text-white/60 disabled:cursor-not-allowed disabled:opacity-35"
+									>
+										{scriptUploading ? '⏳ 执行中…' : '📜 上传脚本'}
+									</button>
+									<div className="glass glass-input flex h-8 flex-1 items-center gap-2 rounded-lg px-2.5">
+										<span className="shrink-0 select-none text-white/40 text-[11px] font-mono">$</span>
+										<input
+											ref={sshTerminalInputRef}
+											value={sshTerminalInput}
+											onChange={(e) => setSshTerminalInput(e.target.value)}
+											onKeyDown={(e) => {
+												if (e.key === 'Enter') void handleSshTerminalExec();
+											}}
+											disabled={!activeConnection || sshTerminalRunning}
+											placeholder={activeConnection ? '输入命令，按 Enter 执行…' : '请先连接远程机器'}
+											className="min-w-0 flex-1 bg-transparent text-[12px] text-white/80 placeholder:text-white/25 focus:outline-none disabled:cursor-not-allowed disabled:opacity-40"
+											spellCheck={false}
+											autoComplete="off"
+										/>
+										{sshTerminalRunning ? (
+											<svg
+												className="h-3.5 w-3.5 shrink-0 animate-spin text-white/25"
+												viewBox="0 0 24 24"
+												fill="none"
+												stroke="currentColor"
+												strokeWidth="2"
+											>
+												<path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4" />
+											</svg>
+										) : (
+											<button
+												type="button"
+												onClick={() => void handleSshTerminalExec()}
+												disabled={!activeConnection || !sshTerminalInput.trim()}
+												className="shrink-0 rounded px-1.5 py-0.5 text-[10px] text-white/30 transition-colors hover:bg-white/[0.06] hover:text-white/70 disabled:opacity-0"
+											>
+												↵
+											</button>
+										)}
+									</div>
+								</div>
+							</div>
+						)}
+
+						{/* ── 文件内容面板 ─────────────────────────────────────── */}
+						{rightPanelTab === 'file' && (
+							<AnimatePresence mode="wait">
+								{selectedFile ? (
+									<motion.div
+										key={`${activeConnectionId ?? 'none'}:${selectedFile}`}
+										initial={{ opacity: 0, x: 12 }}
+										animate={{ opacity: 1, x: 0 }}
+										exit={{ opacity: 0 }}
+										transition={{ duration: 0.2 }}
+										className="glass app-card relative flex h-full min-h-0 flex-col overflow-hidden"
+									>
+										<div
+											className="pointer-events-none absolute inset-x-0 top-0 h-px
+                bg-gradient-to-r from-transparent via-white/70 to-transparent"
+										/>
+
+										{/* 工具栏 */}
+										<div
+											className="flex shrink-0 items-center gap-2
+                border-b border-white/[0.06] px-4 py-2.5"
+										>
+											{/* 文件路径 */}
+											<span
+												className="min-w-0 flex-1 truncate font-mono text-[11px] text-white/50"
+												title={sftpToDisplay(selectedFile)}
+											>
+												{sftpToDisplay(selectedFile)}
+											</span>
+
+											{/* 自动刷新 */}
+											<button
+												type="button"
+												onClick={() => setAutoRefresh((v) => !v)}
+												disabled={fileReadError}
+												className={`flex shrink-0 items-center gap-1.5 rounded-lg px-2.5 py-1
                     text-[11px] transition-colors disabled:cursor-not-allowed disabled:opacity-35
                     ${
 											autoRefresh
 												? 'bg-emerald-500/15 text-emerald-400'
 												: 'bg-white/[0.04] text-white/35 hover:text-white/65'
 										}`}
-									>
-										<span
-											className={`h-1.5 w-1.5 rounded-full ${autoRefresh ? 'bg-emerald-400 animate-pulse' : 'bg-white/20'}`}
-										/>
-										{autoRefresh ? '监视中' : '实时监视'}
-									</button>
-
-									{/* 手动刷新 */}
-									<button
-										type="button"
-										onClick={() => {
-											if (!activeConnectionId) return;
-											isDirty.current = false;
-											setIsEditing(false);
-											loadFile(activeConnectionId, selectedFile);
-										}}
-										className="shrink-0 rounded-lg bg-white/[0.04] px-2.5 py-1
-                    text-[11px] text-white/35 transition-colors hover:text-white/65"
-									>
-										刷新
-									</button>
-
-									{/* 视图 / 编辑 切换 */}
-									<button
-										type="button"
-										onClick={() => setIsEditing((v) => !v)}
-										disabled={fileReadError}
-										className={`shrink-0 rounded-lg px-2.5 py-1 text-[11px] transition-colors disabled:cursor-not-allowed disabled:opacity-35 ${
-											isEditing
-												? 'bg-white/[0.08] text-white/70 hover:text-white'
-												: 'bg-white/[0.04] text-white/35 hover:text-white/65'
-										}`}
-									>
-										{isEditing ? '🔒 退出编辑' : '✏️ 编辑'}
-									</button>
-
-									<FileContentCopyButton content={editorDraft} disabled={loadingFile || fileReadError} />
-
-									{/* 保存（仅编辑模式显示） */}
-									{isEditing && !fileReadError && (
-										<button
-											type="button"
-											onClick={handleSave}
-											disabled={saving}
-											className="shrink-0 rounded-lg px-3 py-1 text-[11px] font-medium
-                    text-white transition-all disabled:opacity-40"
-											style={{
-												background: 'rgb(var(--accent-rgb) / 0.14)',
-												border: '1px solid rgb(var(--accent-rgb) / 0.3)',
-											}}
-										>
-											{saving ? '保存中…' : '保 存'}
-										</button>
-									)}
-
-									{/* 保存状态提示 */}
-									<AnimatePresence>
-										{saveMsg && (
-											<motion.span
-												initial={{ opacity: 0, x: 6 }}
-												animate={{ opacity: 1, x: 0 }}
-												exit={{ opacity: 0 }}
-												className={`shrink-0 text-[11px] ${saveMsg.startsWith('✗') ? 'text-rose-400' : 'text-emerald-400'}`}
 											>
-												{saveMsg}
-											</motion.span>
-										)}
-									</AnimatePresence>
-								</div>
+												<span
+													className={`h-1.5 w-1.5 rounded-full ${autoRefresh ? 'bg-emerald-400 animate-pulse' : 'bg-white/20'}`}
+												/>
+												{autoRefresh ? '监视中' : '实时监视'}
+											</button>
 
-								{!isEditing && !fileReadError && (
-									<div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-white/[0.05] px-4 py-2">
-										<div className="glass glass-input flex h-8 min-w-[180px] flex-1 items-center gap-2 rounded-lg px-2.5">
-											<svg
-												viewBox="0 0 24 24"
-												className="h-3.5 w-3.5 shrink-0 text-white/30"
-												fill="none"
-												stroke="currentColor"
-												strokeWidth="2"
-												strokeLinecap="round"
-											>
-												<circle cx="11" cy="11" r="7" />
-												<path d="m16.5 16.5 3 3" />
-											</svg>
-											<input
-												value={textSearchQuery}
-												onChange={(e) => {
-													const next = e.target.value;
-													setTextSearchQuery(next);
+											{/* 手动刷新 */}
+											<button
+												type="button"
+												onClick={() => {
+													if (!activeConnectionId) return;
+													isDirty.current = false;
+													setIsEditing(false);
+													loadFile(activeConnectionId, selectedFile);
 												}}
-												placeholder="搜索文本"
-												className="min-w-0 flex-1 bg-transparent text-[12px] text-white/75 placeholder:text-white/28 focus:outline-none"
-											/>
-											{textSearchQuery && (
+												className="shrink-0 rounded-lg bg-white/[0.04] px-2.5 py-1
+                    text-[11px] text-white/35 transition-colors hover:text-white/65"
+											>
+												刷新
+											</button>
+
+											{/* 视图 / 编辑 切换 */}
+											<button
+												type="button"
+												onClick={() => setIsEditing((v) => !v)}
+												disabled={fileReadError}
+												className={`shrink-0 rounded-lg px-2.5 py-1 text-[11px] transition-colors disabled:cursor-not-allowed disabled:opacity-35 ${
+													isEditing
+														? 'bg-white/[0.08] text-white/70 hover:text-white'
+														: 'bg-white/[0.04] text-white/35 hover:text-white/65'
+												}`}
+											>
+												{isEditing ? '🔒 退出编辑' : '✏️ 编辑'}
+											</button>
+
+											<FileContentCopyButton content={editorDraft} disabled={loadingFile || fileReadError} />
+
+											{/* 保存（仅编辑模式显示） */}
+											{isEditing && !fileReadError && (
 												<button
 													type="button"
-													onClick={() => {
-														setTextSearchQuery('');
+													onClick={handleSave}
+													disabled={saving}
+													className="shrink-0 rounded-lg px-3 py-1 text-[11px] font-medium
+                    text-white transition-all disabled:opacity-40"
+													style={{
+														background: 'rgb(var(--accent-rgb) / 0.14)',
+														border: '1px solid rgb(var(--accent-rgb) / 0.3)',
 													}}
-													aria-label="清除搜索"
-													className="shrink-0 rounded-md px-1.5 text-[13px] text-white/35 transition-colors hover:bg-white/[0.06] hover:text-white/70"
 												>
-													×
+													{saving ? '保存中…' : '保 存'}
 												</button>
 											)}
-										</div>
-										<button
-											type="button"
-											onClick={() => setFilterProblemContext((value) => !value)}
-											title={`过滤错误/异常/警告及上下 ${PROBLEM_CONTEXT_LINES} 行`}
-											className={`remote-toolbar-button h-8 shrink-0 rounded-lg px-2.5 text-[11px] transition-colors ${
-												filterProblemContext ? 'remote-toolbar-button-active' : ''
-											}`}
-										>
-											Filter
-										</button>
-										<span
-											className={`remote-toolbar-badge shrink-0 rounded-lg px-2.5 py-1 text-[11px] ${useLogViewer ? 'remote-toolbar-badge-active' : ''}`}
-										>
-											{useLogViewer ? 'CMTrace' : 'Text'}
-										</span>
-										<span className="remote-toolbar-meta shrink-0 text-[11px]">
-											{filterProblemContext && textSearchResult.problemFiltered
-												? `${textSearchResult.problemLineCount.toLocaleString()} 条问题 · ${textSearchResult.problemContextLineCount.toLocaleString()} 行上下文`
-												: textSearchResult.hasQuery
-													? `${textSearchResult.totalMatches.toLocaleString()} 个匹配 · ${textSearchResult.matchedLineCount.toLocaleString()} 行`
-													: `${textSearchResult.rawLineCount.toLocaleString()} 行`}
-										</span>
-									</div>
-								)}
 
-								{/* 查看区 / 编辑区 */}
-								{loadingFile ? (
-									<div className="flex flex-1 items-center justify-center gap-2 text-sm text-white/30">
-										<svg
-											className="h-4 w-4 animate-spin"
-											viewBox="0 0 24 24"
-											fill="none"
-											stroke="currentColor"
-											strokeWidth="2"
-										>
-											<path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4" />
-										</svg>
-										加载中…
-									</div>
-								) : isEditing ? (
-									<textarea
-										className="remote-file-scrollbar min-h-0 flex-1 resize-none overflow-y-auto bg-transparent px-5 py-4
+											{/* 保存状态提示 */}
+											<AnimatePresence>
+												{saveMsg && (
+													<motion.span
+														initial={{ opacity: 0, x: 6 }}
+														animate={{ opacity: 1, x: 0 }}
+														exit={{ opacity: 0 }}
+														className={`shrink-0 text-[11px] ${saveMsg.startsWith('✗') ? 'text-rose-400' : 'text-emerald-400'}`}
+													>
+														{saveMsg}
+													</motion.span>
+												)}
+											</AnimatePresence>
+										</div>
+
+										{!isEditing && !fileReadError && (
+											<div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-white/[0.05] px-4 py-2">
+												<div className="glass glass-input flex h-8 min-w-[180px] flex-1 items-center gap-2 rounded-lg px-2.5">
+													<svg
+														viewBox="0 0 24 24"
+														className="h-3.5 w-3.5 shrink-0 text-white/30"
+														fill="none"
+														stroke="currentColor"
+														strokeWidth="2"
+														strokeLinecap="round"
+													>
+														<circle cx="11" cy="11" r="7" />
+														<path d="m16.5 16.5 3 3" />
+													</svg>
+													<input
+														value={textSearchQuery}
+														onChange={(e) => {
+															const next = e.target.value;
+															setTextSearchQuery(next);
+														}}
+														placeholder="搜索文本"
+														className="min-w-0 flex-1 bg-transparent text-[12px] text-white/75 placeholder:text-white/28 focus:outline-none"
+													/>
+													{textSearchQuery && (
+														<button
+															type="button"
+															onClick={() => {
+																setTextSearchQuery('');
+															}}
+															aria-label="清除搜索"
+															className="shrink-0 rounded-md px-1.5 text-[13px] text-white/35 transition-colors hover:bg-white/[0.06] hover:text-white/70"
+														>
+															×
+														</button>
+													)}
+												</div>
+												<button
+													type="button"
+													onClick={() => setFilterProblemContext((value) => !value)}
+													title={`过滤错误/异常/警告及上下 ${PROBLEM_CONTEXT_LINES} 行`}
+													className={`remote-toolbar-button h-8 shrink-0 rounded-lg px-2.5 text-[11px] transition-colors ${
+														filterProblemContext ? 'remote-toolbar-button-active' : ''
+													}`}
+												>
+													Filter
+												</button>
+												<span
+													className={`remote-toolbar-badge shrink-0 rounded-lg px-2.5 py-1 text-[11px] ${useLogViewer ? 'remote-toolbar-badge-active' : ''}`}
+												>
+													{useLogViewer ? 'CMTrace' : 'Text'}
+												</span>
+												<span className="remote-toolbar-meta shrink-0 text-[11px]">
+													{filterProblemContext && textSearchResult.problemFiltered
+														? `${textSearchResult.problemLineCount.toLocaleString()} 条问题 · ${textSearchResult.problemContextLineCount.toLocaleString()} 行上下文`
+														: textSearchResult.hasQuery
+															? `${textSearchResult.totalMatches.toLocaleString()} 个匹配 · ${textSearchResult.matchedLineCount.toLocaleString()} 行`
+															: `${textSearchResult.rawLineCount.toLocaleString()} 行`}
+												</span>
+											</div>
+										)}
+
+										{/* 查看区 / 编辑区 */}
+										{loadingFile ? (
+											<div className="flex flex-1 items-center justify-center gap-2 text-sm text-white/30">
+												<svg
+													className="h-4 w-4 animate-spin"
+													viewBox="0 0 24 24"
+													fill="none"
+													stroke="currentColor"
+													strokeWidth="2"
+												>
+													<path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4" />
+												</svg>
+												加载中…
+											</div>
+										) : isEditing ? (
+											<textarea
+												className="remote-file-scrollbar min-h-0 flex-1 resize-none overflow-y-auto bg-transparent px-5 py-4
                     font-mono text-[13px] leading-relaxed text-white/80
                     placeholder:text-white/20 focus:outline-none"
-										spellCheck={false}
-										value={editorDraft}
-										onChange={(e) => handleDraftChange(e.target.value)}
-										placeholder="选择文件后显示内容…"
-										autoFocus
-									/>
-								) : useLogViewer ? (
-									<CmTraceLogContent searchQuery={textSearchQuery} searchResult={textSearchResult} />
+												spellCheck={false}
+												value={editorDraft}
+												onChange={(e) => handleDraftChange(e.target.value)}
+												placeholder="选择文件后显示内容…"
+												autoFocus
+											/>
+										) : useLogViewer ? (
+											<CmTraceLogContent searchQuery={textSearchQuery} searchResult={textSearchResult} />
+										) : (
+											<HighlightedContent searchQuery={textSearchQuery} searchResult={textSearchResult} />
+										)}
+									</motion.div>
 								) : (
-									<HighlightedContent searchQuery={textSearchQuery} searchResult={textSearchResult} />
+									<motion.div
+										key="empty"
+										initial={{ opacity: 0 }}
+										animate={{ opacity: 1 }}
+										className="flex h-full flex-col items-center justify-center gap-3 text-white/20"
+									>
+										<svg
+											viewBox="0 0 24 24"
+											className="h-12 w-12 opacity-30"
+											fill="none"
+											stroke="currentColor"
+											strokeWidth="1.2"
+											strokeLinecap="round"
+										>
+											<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+											<polyline points="14 2 14 8 20 8" />
+											<line x1="16" y1="13" x2="8" y2="13" />
+											<line x1="16" y1="17" x2="8" y2="17" />
+											<polyline points="10 9 9 9 8 9" />
+										</svg>
+										<span className="text-sm">
+											{activeConnection ? '← 在左侧选择一个文件' : '请先连接或选择远程机器'}
+										</span>
+									</motion.div>
 								)}
-							</motion.div>
-						) : (
-							<motion.div
-								key="empty"
-								initial={{ opacity: 0 }}
-								animate={{ opacity: 1 }}
-								className="flex h-full flex-col items-center justify-center gap-3 text-white/20"
-							>
-								<svg
-									viewBox="0 0 24 24"
-									className="h-12 w-12 opacity-30"
-									fill="none"
-									stroke="currentColor"
-									strokeWidth="1.2"
-									strokeLinecap="round"
-								>
-									<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-									<polyline points="14 2 14 8 20 8" />
-									<line x1="16" y1="13" x2="8" y2="13" />
-									<line x1="16" y1="17" x2="8" y2="17" />
-									<polyline points="10 9 9 9 8 9" />
-								</svg>
-								<span className="text-sm">{activeConnection ? '← 在左侧选择一个文件' : '请先连接或选择远程机器'}</span>
-							</motion.div>
+							</AnimatePresence>
 						)}
-					</AnimatePresence>
+					</div>
 				</div>
 			</div>
-		</div>
+
+			{treeContextMenu !== null &&
+				createPortal(
+					<div
+						data-tree-context-menu
+						className="glass app-popover fixed z-[9999] min-w-44 overflow-hidden rounded-xl py-1 text-[12px]"
+						style={{ left: treeContextMenu.x, top: treeContextMenu.y }}
+					>
+						<button
+							type="button"
+							onClick={() => void copyTreeNodePath(treeContextMenu.node)}
+							className="context-menu-item flex w-full items-center gap-2 px-3 py-2 text-left text-white/65 transition-colors hover:text-white/85"
+						>
+							<Icon name="copy" className="h-3.5 w-3.5" aria-hidden="true" />
+							复制 Path
+						</button>
+						<button
+							type="button"
+							onClick={() => void downloadTreeNodeFile(treeContextMenu.node)}
+							disabled={treeContextMenu.node.is_dir}
+							className="context-menu-item flex w-full items-center gap-2 px-3 py-2 text-left text-white/65 transition-colors hover:text-white/85 disabled:cursor-not-allowed disabled:opacity-30"
+						>
+							<Icon name="download" className="h-3.5 w-3.5" aria-hidden="true" />
+							下载文件
+						</button>
+						<button
+							type="button"
+							onClick={() => openTreeNodeInTerminal(treeContextMenu.node)}
+							className="context-menu-item flex w-full items-center gap-2 px-3 py-2 text-left text-white/65 transition-colors hover:text-white/85"
+						>
+							<svg
+								viewBox="0 0 24 24"
+								className="h-3.5 w-3.5"
+								fill="none"
+								stroke="currentColor"
+								strokeWidth="1.8"
+								strokeLinecap="round"
+							>
+								<polyline points="4 17 10 11 4 5" />
+								<line x1="12" y1="19" x2="20" y2="19" />
+							</svg>
+							在 Terminal 中打开
+						</button>
+					</div>,
+					document.body,
+				)}
+		</>
 	);
 }

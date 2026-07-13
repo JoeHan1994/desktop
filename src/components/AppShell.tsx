@@ -26,13 +26,21 @@ function MyToolBoxLogo() {
 		<svg viewBox="0 0 32 32" className="h-7 w-7" fill="none" aria-hidden="true">
 			<defs>
 				<linearGradient id="mytoolbox-logo-bg" x1="5" y1="4" x2="28" y2="29" gradientUnits="userSpaceOnUse">
-					<stop stopColor="#0B1228" />
-					<stop offset="0.55" stopColor="#124A5F" />
-					<stop offset="1" stopColor="#18B59F" />
+					<stop stopColor="#4C1D95" />
+					<stop offset="0.5" stopColor="#6D28D9" />
+					<stop offset="1" stopColor="#8B5CF6" />
 				</linearGradient>
-				<linearGradient id="mytoolbox-logo-box" x1="9" y1="10" x2="24" y2="25" gradientUnits="userSpaceOnUse">
-					<stop stopColor="#DFFCF6" />
-					<stop offset="1" stopColor="#5EEAD4" />
+				<linearGradient id="mytoolbox-logo-body" x1="9" y1="15" x2="23" y2="26" gradientUnits="userSpaceOnUse">
+					<stop stopColor="#F5F3FF" />
+					<stop offset="1" stopColor="#C4B5FD" />
+				</linearGradient>
+				<linearGradient id="mytoolbox-logo-lid" x1="9" y1="12" x2="23" y2="17" gradientUnits="userSpaceOnUse">
+					<stop stopColor="#EDE9FE" />
+					<stop offset="1" stopColor="#A78BFA" />
+				</linearGradient>
+				<linearGradient id="mytoolbox-logo-handle" x1="16" y1="8" x2="16" y2="13" gradientUnits="userSpaceOnUse">
+					<stop stopColor="#DDD6FE" />
+					<stop offset="1" stopColor="#8B5CF6" />
 				</linearGradient>
 			</defs>
 			<rect x="2.5" y="2.5" width="27" height="27" rx="8" fill="url(#mytoolbox-logo-bg)" />
@@ -43,22 +51,23 @@ function MyToolBoxLogo() {
 				height="25.5"
 				rx="7.25"
 				stroke="white"
-				strokeOpacity="0.2"
-				strokeWidth="1.5"
+				strokeOpacity="0.25"
+				strokeWidth="1.4"
 			/>
 			<path
-				d="M11.5 12.5V11c0-1.2.95-2.15 2.15-2.15h4.7c1.2 0 2.15.95 2.15 2.15v1.5"
-				stroke="#B7FFF1"
-				strokeWidth="2.1"
+				d="M12.4 12.4v-1.7c0-1.98 1.62-3.6 3.6-3.6s3.6 1.62 3.6 3.6v1.7"
+				stroke="url(#mytoolbox-logo-handle)"
+				strokeWidth="1.6"
 				strokeLinecap="round"
 			/>
+			<rect x="7.7" y="14.4" width="16.6" height="10.6" rx="1.9" fill="url(#mytoolbox-logo-body)" />
+			<rect x="6.9" y="12.2" width="18.2" height="4.6" rx="1.7" fill="url(#mytoolbox-logo-lid)" />
+			<rect x="8" y="12.7" width="16" height="1" rx="0.5" fill="white" fillOpacity="0.5" />
+			<circle cx="16" cy="20" r="2.9" fill="#6D28D9" />
 			<path
-				d="M8.7 14.25h14.6c1.05 0 1.9.85 1.9 1.9v8.05H6.8v-8.05c0-1.05.85-1.9 1.9-1.9Z"
-				fill="url(#mytoolbox-logo-box)"
+				d="M16 18l0.55 1.05 1.15 0.16-0.85 0.82 0.2 1.15-1.05-0.56-1.05 0.56 0.2-1.15-0.85-0.82 1.15-0.16z"
+				fill="white"
 			/>
-			<path d="M6.8 18.65h18.4" stroke="#0B3144" strokeOpacity="0.45" strokeWidth="1.7" />
-			<rect x="14.1" y="17.3" width="3.8" height="3.8" rx="1.1" fill="#F8D66B" />
-			<path d="M8.8 23.95h14.4" stroke="white" strokeOpacity="0.35" strokeWidth="1.2" strokeLinecap="round" />
 		</svg>
 	);
 }
