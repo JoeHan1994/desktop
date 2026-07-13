@@ -5,14 +5,16 @@
 
 use std::sync::Arc;
 
+use base64::{engine::general_purpose, Engine as _};
 use russh::client;
+use russh::ChannelMsg;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
 use crate::text_file::{decode_lossy_text_file, ensure_supported_text_path};
 
 use super::{
     connection_handle, drive_to_sftp, exec_cmd, make_connection_id, connection_label,
-    open_sftp, sftp_join, FileEntry, HyperVVirtualMachine, RemoteConnection,
+    open_sftp, sftp_join, sftp_to_windows, FileEntry, HyperVVirtualMachine, RemoteConnection,
     SshConn, SshHandler, SshState,
 };
 
@@ -297,4 +299,82 @@ pub async fn unwatch_file(
     let conn = guard.get_mut(connection_id).ok_or("未连接")?;
     conn.watchers.remove(path);
     Ok(())
+}
+
+// ── Read file bytes (binary download as base64) ───────────────────────────
+
+/// 读取远程文件原始字节，返回 base64 字符串。
+pub async fn read_file_bytes(
+    state: &SshState,
+    connection_id: &str,
+    path: &str,
+) -> Result<String, String> {
+    let handle = connection_handle(state, connection_id).await?;
+    let sftp = open_sftp(&handle).await?;
+    let mut file = sftp
+        .open(path)
+        .await
+        .map_err(|e| format!("打开文件失败 ({path}): {e}"))?;
+    let mut buf = Vec::new();
+    file.read_to_end(&mut buf).await.map_err(|e| e.to_string())?;
+    Ok(general_purpose::STANDARD.encode(buf))
+}
+
+// ── Remote command execution ──────────────────────────────────────────────
+
+/// 在远程机器上执行一条 shell 命令，返回合并后的 stdout + stderr 内容。
+pub async fn exec_command(
+    state: &SshState,
+    connection_id: &str,
+    command: &str,
+    cwd: Option<&str>,
+) -> Result<String, String> {
+    let handle = connection_handle(state, connection_id).await?;
+
+    // 限制命令长度，防止注入超长负载
+    if command.len() > 4096 {
+        return Err("命令长度超出限制（4096 字节）".to_string());
+    }
+
+    let mut channel = handle
+        .channel_open_session()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // 使用 cmd 执行，必要时先切换工作目录，并合并 stderr 到 stdout。
+    let wrapped = match cwd.map(str::trim).filter(|v| !v.is_empty()) {
+        Some(path) => {
+            let windows_path = sftp_to_windows(path);
+            format!(
+                "cmd /d /s /c \"cd /d \"{}\" && {} 2>&1\"",
+                windows_path, command
+            )
+        }
+        None => format!("cmd /d /s /c \"{} 2>&1\"", command),
+    };
+    channel
+        .exec(true, wrapped.as_str())
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let mut stdout_buf = Vec::new();
+    let mut stderr_buf = Vec::new();
+    loop {
+        match channel.wait().await {
+            Some(ChannelMsg::Data { data }) => stdout_buf.extend_from_slice(&data),
+            Some(ChannelMsg::ExtendedData { data, .. }) => stderr_buf.extend_from_slice(&data),
+            Some(ChannelMsg::Eof) | None => break,
+            _ => {}
+        }
+    }
+
+    let mut output = String::from_utf8_lossy(&stdout_buf).into_owned();
+    let stderr_str = String::from_utf8_lossy(&stderr_buf).into_owned();
+    if !stderr_str.trim().is_empty() {
+        if !output.is_empty() {
+            output.push('\n');
+        }
+        output.push_str(&stderr_str);
+    }
+    Ok(output)
 }
