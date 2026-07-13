@@ -141,3 +141,6 @@ dist
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 .vite/
+
+./sidecar/ku/terraforge_knowledge_db_v2/
+./sidecar/ku/.reranker_cache/
