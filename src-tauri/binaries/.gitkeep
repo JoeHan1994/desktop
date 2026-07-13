@@ -1,0 +1,5 @@
+# This directory holds the compiled sidecar binaries.
+
+# In development, the Python script is run directly.
+
+# For production builds, run: python sidecar/build.py
