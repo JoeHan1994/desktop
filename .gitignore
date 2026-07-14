@@ -142,5 +142,18 @@ vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 .vite/
 
-./sidecar/ku/terraforge_knowledge_db_v2/
-./sidecar/ku/.reranker_cache/
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# Rust / Tauri
+src-tauri/target/
+
+# Sidecar data
+sidecar/ku/terraforge_knowledge_db_v2/
+sidecar/ku/.reranker_cache/

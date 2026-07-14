@@ -378,7 +378,7 @@ print(f"         Embedding 模型: bge-m3:567m (Ollama)")
 print(f"         Ollama 地址: http://localhost:11434")
 
 embedding_model = OllamaEmbeddings(
-    model="bge-m3:567m", base_url="http://localhost:11434"
+    model="bge-m3:latest", base_url="http://localhost:11434"
 )
 persist_directory = str(SCRIPT_DIR / "terraforge_knowledge_db_v2")
 print(f"         存储目录: {persist_directory}")
@@ -416,7 +416,12 @@ from transformers import AutoModelForSequenceClassification, AutoTokenizer
 llm = ChatOllama(model="qwen2.5:3b", base_url="http://localhost:11434")
 
 # 初始化 Reranker（首次运行会自动下载模型，约 1.1GB）
+# 临时指定模型缓存目录，不设置则默认存至 ~/.cache/huggingface/hub/
+import os
+os.environ["HF_HOME"] = str(SCRIPT_DIR / "hf_cache")
+
 print("\n[Reranker] 加载重排序模型 (bge-reranker-v2-m3)...")
+print(f"           缓存目录: {os.environ['HF_HOME']}")
 reranker_tokenizer = AutoTokenizer.from_pretrained("BAAI/bge-reranker-v2-m3")
 reranker_model = AutoModelForSequenceClassification.from_pretrained(
     "BAAI/bge-reranker-v2-m3"
@@ -444,7 +449,7 @@ def retrieve_with_scores(question: str) -> list[tuple[Document, float]]:
 def ask(question: str, docs: list[Document] | None = None) -> str:
     """根据向量数据库检索相关文档，调用 LLM 回答问题"""
     if docs is None:
-        docs = retriever.invoke(question)
+        docs = list(retriever.invoke(question))
 
     # 构建上下文，包含元数据中的关联信息
     context_parts = []
