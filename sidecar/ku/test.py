@@ -1,4 +1,5 @@
 import re
+import math
 from pathlib import Path
 from collections import Counter
 
@@ -9,6 +10,7 @@ from langchain_text_splitters import (
 from langchain_ollama import OllamaEmbeddings
 from langchain_community.vectorstores import Chroma
 from langchain_core.documents import Document
+from langchain_core.messages import SystemMessage, HumanMessage
 
 # ==========================================
 # 配置
@@ -166,11 +168,34 @@ STOP_WORDS = {
 }
 
 
-def extract_tags(text: str, top_n: int = 6) -> list[str]:
-    """从文本中提取高频关键词作为标签"""
+def compute_idf(md_files: list[Path]) -> dict[str, float]:
+    """基于整个文档集合计算逆文档频率（IDF），供 TF-IDF 标签提取使用
+
+    在多个文档中都出现的通用词（如 session、user）会得到较低的 IDF，
+    只在少数文档中出现的高区分度词会得到较高的 IDF，从而让不同文档产出不同标签。
+    """
+    doc_count = len(md_files)
+    df: Counter[str] = Counter()
+    for file_path in md_files:
+        content = file_path.read_text(encoding="utf-8").lower()
+        words = set(re.findall(r"\b[a-z]{3,}\b", content))
+        for w in words:
+            if w not in STOP_WORDS:
+                df[w] += 1
+    # 平滑处理，避免除零；出现文档数越多，权重越低
+    return {w: math.log((doc_count + 1) / (freq + 1)) + 1 for w, freq in df.items()}
+
+
+def extract_tags(text: str, idf: dict[str, float], top_n: int = 6) -> list[str]:
+    """基于 TF-IDF 从文本中提取具有区分度的关键词作为标签"""
     words = re.findall(r"\b[a-z]{3,}\b", text.lower())
-    freq = Counter(w for w in words if w not in STOP_WORDS)
-    return [w for w, _ in freq.most_common(top_n) if freq[w] >= 1]
+    tf = Counter(w for w in words if w not in STOP_WORDS)
+    if not tf:
+        return []
+    # TF-IDF 打分：词频 × 逆文档频率（未在语料中出现的词默认给中性权重 1.0）
+    scores = {w: count * idf.get(w, 1.0) for w, count in tf.items()}
+    ranked = sorted(scores.items(), key=lambda x: (x[1], x[0]), reverse=True)
+    return [w for w, _ in ranked[:top_n]]
 
 
 def resolve_doc_link(link: str, current_file: Path, docs_root: Path) -> str | None:
@@ -197,7 +222,9 @@ def resolve_doc_link(link: str, current_file: Path, docs_root: Path) -> str | No
     return None
 
 
-def process_markdown_file(file_path: Path, docs_root: Path) -> list[Document]:
+def process_markdown_file(
+    file_path: Path, docs_root: Path, idf: dict[str, float]
+) -> list[Document]:
     """处理单个 Markdown 文件，返回带元数据的 Document 列表"""
     # 计算相对于 docs 根目录的路径（保留文件夹结构）
     relative_path = file_path.relative_to(docs_root).as_posix()
@@ -223,6 +250,7 @@ def process_markdown_file(file_path: Path, docs_root: Path) -> list[Document]:
     cleaned_content = (
         cleaned_content.replace("::: tip", "\n【提示】\n")
         .replace("::: warning", "\n【警告】\n")
+        .replace("::: danger", "\n【危险】\n")
         .replace(":::", "")
     )
 
@@ -306,8 +334,8 @@ def process_markdown_file(file_path: Path, docs_root: Path) -> list[Document]:
         )
         meta["links"] = external_links if external_links else None
 
-        # 关键词标签
-        tags = extract_tags(text)
+        # 关键词标签（TF-IDF，跨文档区分）
+        tags = extract_tags(text, idf)
         meta["tags"] = ", ".join(tags) if tags else None
 
         documents.append(Document(page_content=text, metadata=meta))
@@ -328,9 +356,12 @@ print(f"       发现 {len(md_files)} 个 Markdown 文件:")
 for f in md_files:
     print(f"         - {f.relative_to(DOCS_DIR).as_posix()}")
 
+# 预先基于整个文档集合计算 IDF，供 TF-IDF 标签提取使用
+idf = compute_idf(md_files)
+
 all_documents: list[Document] = []
 for md_file in md_files:
-    docs = process_markdown_file(md_file, DOCS_DIR)
+    docs = process_markdown_file(md_file, DOCS_DIR, idf)
     all_documents.extend(docs)
 
 # 统计汇总
@@ -413,11 +444,12 @@ from langchain_ollama import ChatOllama
 import torch
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
-llm = ChatOllama(model="qwen2.5:3b", base_url="http://localhost:11434")
+llm = ChatOllama(model="gemma4:e2b", base_url="http://localhost:11434")
 
 # 初始化 Reranker（首次运行会自动下载模型，约 1.1GB）
 # 临时指定模型缓存目录，不设置则默认存至 ~/.cache/huggingface/hub/
 import os
+
 os.environ["HF_HOME"] = str(SCRIPT_DIR / "hf_cache")
 
 print("\n[Reranker] 加载重排序模型 (bge-reranker-v2-m3)...")
@@ -432,8 +464,18 @@ print("[Reranker] 模型加载完成 (bge-reranker-v2-m3, CPU, multilingual)")
 # 加载已有的向量数据库（后续单独运行问答时可跳过写入阶段）
 retriever = db.as_retriever(search_type="similarity", search_kwargs={"k": 4})
 
-# 相关性分数阈值（Chroma 返回的是 L2 距离，越小越相似；此处设定最大可接受距离）
-# 因为有 Reranker 二次精排，粗筛阶段可以适当放宽
+# 向量召回数量：尽量多召回候选，交给 Reranker 精排。
+# 跨语言 / 短查询时向量 L2 距离普遍聚集在 ~1.0 附近、区分度低，
+# 所以这里不再用向量距离做硬过滤（否则会把真正相关的章节误删），召回交给 Reranker 判断。
+RETRIEVE_K = 12
+# Reranker 相关概率（sigmoid(logit)，范围 0~1，越高越相关）阈值：仅用于剔除明显不相关的噪声片段，
+# 真正的相关性排序依赖 Reranker 本身；设得较宽松，避免误杀跨语言场景下概率整体偏低的相关片段。
+# 用概率而非 logit 做阈值：概率有绝对物理意义（0~1），跨查询/跨模型可比、直觉易解释。
+RERANK_PROB_THRESHOLD = 0.05
+# 最终提供给 LLM 的片段数量：多片段上下文优于单片段，避免答案空洞/跑题。
+RERANK_TOP_N = 3
+
+# 兼容旧函数 retrieve_with_scores 的向量距离阈值（主流程已改用 Reranker 精排）
 RELEVANCE_DISTANCE_THRESHOLD = 1.0
 
 
@@ -464,20 +506,23 @@ def ask(question: str, docs: list[Document] | None = None) -> str:
 
     context = "\n\n".join(context_parts)
 
-    prompt = f"""你是 Terraforge 产品文档助手。请根据以下检索到的文档片段回答用户的问题。
+    system_prompt = """你是 Terraforge 产品文档助手。请根据检索到的文档片段回答用户的问题。
 
-检索到的文档片段：
+要求：
+1. 请用中文回答。
+2. 在作答之前，请先阅读检索到的文档片段，确保回答基于文档内容，而不是凭记忆或假设。
+3. 在作答之前，请先思考是否有先决条件，以及当前行为的影响，如果没有不在回答中提及。
+4. 如果文档中有关联的视频或者文档链接，请在回答中提及。
+5. 如果文档中没有明确答案，请如实说明不知道，不要编造答案。"""
+
+    user_prompt = f"""检索到的文档片段：
 {context}
 
-用户问题：{question}
+用户问题：{question}"""
 
-请用中文回答：
-
-注意：
-如果文档中有关联文档或演示视频，请在回答中提及。
-如果文档片段不足以回答问题，请如实说明不知道，不要编造答案。"""
-
-    response = llm.invoke(prompt)
+    response = llm.invoke(
+        [SystemMessage(content=system_prompt), HumanMessage(content=user_prompt)]
+    )
     return str(response.content)
 
 
@@ -486,7 +531,9 @@ print("\n" + "=" * 50)
 print("📖 Terraforge 文档问答系统已就绪")
 print("   模型: qwen2.5:3b | 向量库: ChromaDB")
 print("   Reranker: bge-reranker-v2-m3 (multilingual)")
-print(f"   相关性阈值: {RELEVANCE_DISTANCE_THRESHOLD} (L2 距离，越小越严格)")
+print(
+    f"   召回 {RETRIEVE_K} 个候选 → Reranker 精排 → 取前 {RERANK_TOP_N} 个 (相关概率>{RERANK_PROB_THRESHOLD})"
+)
 print("   输入问题开始提问，输入 'q' 退出")
 print("=" * 50)
 
@@ -497,59 +544,67 @@ while True:
         break
     if not question:
         continue
-    print("\n⏳ 正在检索相关文档...")
-    all_results = db.similarity_search_with_score(question, k=6)
-    print(f"   阈值: {RELEVANCE_DISTANCE_THRESHOLD} | 原始检索结果:")
-    for i, (doc, score) in enumerate(all_results):
-        status = "✓ 通过" if score < RELEVANCE_DISTANCE_THRESHOLD else "✗ 过滤"
-        print(f"     [{i+1}] 距离={score:.4f} {status} | {doc.metadata['title']}")
-    results_with_scores = [
-        (doc, score)
-        for doc, score in all_results
-        if score < RELEVANCE_DISTANCE_THRESHOLD
-    ]
+    # 1) 向量粗召回：多召回候选，交给 Reranker 精排。
+    #    跨语言 / 短查询时向量距离区分度低，这里不做距离硬过滤，只负责"召回"。
+    print("\n⏳ 正在检索候选文档...")
+    candidates = db.similarity_search_with_score(question, k=RETRIEVE_K)
+    print(f"   向量召回 {len(candidates)} 个候选（距离越小越近）:")
+    for i, (doc, dist) in enumerate(candidates):
+        print(f"     [{i+1}] 距离={dist:.4f} | {doc.metadata['title']}")
 
-    if not results_with_scores:
-        # 没有相关文档，直接用 LLM 回答（日常对话模式）
+    if not candidates:
         print(f"\n{'─' * 50}")
-        print("📚 未检索到相关文档（相关性不足），进入日常对话模式")
+        print("📚 未召回任何文档，进入日常对话模式")
         print(f"{'─' * 50}")
         response = llm.invoke(question)
         print(f"\n💬 回答:\n{response.content}")
         continue
 
-    retrieved_docs = [doc for doc, _ in results_with_scores]
-
-    # Reranker 重排序
+    # 2) Reranker 精排：对所有候选逐一打分（比向量距离更可靠）
     print(f"\n🔄 Reranker 重排序中...")
-    pairs = [[question, doc.page_content] for doc in retrieved_docs]
+    cand_docs = [doc for doc, _ in candidates]
+    # 把章节标题拼进正文再送 Reranker：正文里往往缺少像 "Assign Session" 这样的强主题信号，
+    # 补上标题能让 Reranker 更准确地匹配主题（例如"分配会话"对上 "Assign Session" 章节）。
+    pairs = [
+        [question, f"{doc.metadata.get('title', '')}\n\n{doc.page_content}"]
+        for doc in cand_docs
+    ]
     with torch.no_grad():
         inputs = reranker_tokenizer(
             pairs, padding=True, truncation=True, return_tensors="pt", max_length=512
         )
-        scores = (
-            reranker_model(**inputs, return_dict=True).logits.view(-1).float().tolist()
-        )
+        logits = reranker_model(**inputs, return_dict=True).logits.view(-1).float()
+        rerank_scores = logits.tolist()
+        rerank_probs = torch.sigmoid(logits).tolist()
 
-    # 按 reranker 分数重排文档
-    reranked_docs = sorted(
+    # 按 Reranker 分数降序重排
+    ranked = sorted(
         [
-            (retrieved_docs[i], scores[i], results_with_scores[i][1])
-            for i in range(len(retrieved_docs))
+            (cand_docs[i], rerank_scores[i], rerank_probs[i], candidates[i][1])
+            for i in range(len(cand_docs))
         ],
         key=lambda x: x[1],
         reverse=True,
     )
 
-    # 格式化打印重排序结果
+    # 3) 用 Reranker 相关概率剔除明显无关项，再取 Top-N 作为最终上下文
+    #    item[2] 是相关概率 prob（sigmoid(logit)）；排序仍按 logit，二者单调等价，结果一致。
+    passing = [item for item in ranked if item[2] > RERANK_PROB_THRESHOLD]
+    relevant = passing[:RERANK_TOP_N]
+
+    # 格式化打印精排结果
     print(f"\n{'─' * 50}")
-    print(f"📚 Reranker 重排序后 ({len(reranked_docs)} 个片段):")
+    print(
+        f"📚 Reranker 精排结果（阈值 相关概率>{RERANK_PROB_THRESHOLD}，最终取前 {RERANK_TOP_N} 个）:"
+    )
     print(f"{'─' * 50}")
-    for i, (doc, rerank_score, vector_dist) in enumerate(reranked_docs):
+    for i, (doc, score, prob, vector_dist) in enumerate(ranked):
         m = doc.metadata
-        best_mark = " ⭐" if i == 0 else ""
+        used = i < len(relevant)
+        status = "✓ 采用" if used else "· 舍弃"
+        best_mark = " ⭐" if i == 0 and used else ""
         print(
-            f"\n  ┌─ 片段 {i+1}/{len(reranked_docs)} (rerank分数: {rerank_score:.4f} | 向量距离: {vector_dist:.4f}){best_mark}"
+            f"\n  ┌─ [{status}] rerank分数: {score:.4f} (相关概率: {prob:.3f}) | 向量距离: {vector_dist:.4f}{best_mark}"
         )
         print(f"  │ 来源: {m['source']}")
         print(f"  │ 章节: {m['title']}")
@@ -566,9 +621,18 @@ while True:
         print(f"  │ 预览: {preview}...")
         print(f"  └{'─' * 40}")
 
-    # 取 reranker 排序后的最佳文档
-    best_doc = reranked_docs[0][0]
-    print(f"\n🤖 正在基于最佳匹配片段生成回答...")
+    if not relevant:
+        # Reranker 判定全部候选都不相关，进入日常对话模式
+        print(f"\n{'─' * 50}")
+        print("📚 Reranker 判定无相关文档（相关性不足），进入日常对话模式")
+        print(f"{'─' * 50}")
+        response = llm.invoke(question)
+        print(f"\n💬 回答:\n{response.content}")
+        continue
 
-    answer = ask(question, [best_doc])
+    # 4) 把 Top-N 个最相关片段一起交给 LLM（而不是只用 1 个），提供更充分的上下文
+    top_docs = [doc for doc, _, _, _ in relevant]
+    print(f"\n🤖 正在基于前 {len(top_docs)} 个最相关片段生成回答...")
+
+    answer = ask(question, top_docs)
     print(f"\n💬 回答:\n{answer}")
