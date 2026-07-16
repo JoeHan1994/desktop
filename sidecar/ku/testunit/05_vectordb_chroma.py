@@ -29,7 +29,7 @@
 
 【依赖】
   pip install langchain-ollama langchain-community chromadb langchain-core
-  
+
   还需要运行 Ollama 并拉取嵌入模型:
   ollama pull bge-m3:latest
 
@@ -82,23 +82,43 @@ from langchain_core.documents import Document
 documents = [
     Document(
         page_content="The Assign Session feature allows administrators to assign sessions to users.",
-        metadata={"source": "assign-session.md", "title": "Assign Session > Overview", "chunk_id": 0}
+        metadata={
+            "source": "assign-session.md",
+            "title": "Assign Session > Overview",
+            "chunk_id": 0,
+        },
     ),
     Document(
         page_content="To assign a session: 1. Go to Dashboard 2. Click Sessions 3. Click Assign button",
-        metadata={"source": "assign-session.md", "title": "Assign Session > Steps", "chunk_id": 1}
+        metadata={
+            "source": "assign-session.md",
+            "title": "Assign Session > Steps",
+            "chunk_id": 1,
+        },
     ),
     Document(
         page_content="SSH key generation: Use ssh-keygen to create a new key pair for remote access.",
-        metadata={"source": "remote-setup.md", "title": "Remote > SSH Keys", "chunk_id": 0}
+        metadata={
+            "source": "remote-setup.md",
+            "title": "Remote > SSH Keys",
+            "chunk_id": 0,
+        },
     ),
     Document(
         page_content="Share a session by generating a share link from the session detail page.",
-        metadata={"source": "share-session.md", "title": "Share Session > Guide", "chunk_id": 0}
+        metadata={
+            "source": "share-session.md",
+            "title": "Share Session > Guide",
+            "chunk_id": 0,
+        },
     ),
     Document(
         page_content="Configure the remote machine by importing the SSH profile template.",
-        metadata={"source": "remote-setup.md", "title": "Remote > Configuration", "chunk_id": 1}
+        metadata={
+            "source": "remote-setup.md",
+            "title": "Remote > Configuration",
+            "chunk_id": 1,
+        },
     ),
 ]
 
@@ -140,8 +160,7 @@ try:
 
     print("\n  正在连接 Ollama 服务...")
     embedding_model = OllamaEmbeddings(
-        model="bge-m3:latest",
-        base_url="http://localhost:11434"
+        model="bge-m3:latest", base_url="http://localhost:11434"
     )
 
     # 使用临时目录存储（避免污染项目目录）
@@ -173,16 +192,18 @@ try:
 
     # 测试几个不同的查询
     test_queries = [
-        "如何分配会话给用户",          # 中文查询！（跨语言能力）
-        "how to generate SSH keys",    # 英文查询
-        "share session link",          # 关键词查询
+        "如何分配会话给用户",  # 中文查询！（跨语言能力）
+        "how to generate SSH keys",  # 英文查询
+        "share session link",  # 关键词查询
     ]
 
     for query in test_queries:
-        print(f"\n  🔍 查询: \"{query}\"")
+        print(f'\n  🔍 查询: "{query}"')
         results = db.similarity_search_with_score(query, k=3)
         for i, (doc, score) in enumerate(results):
-            relevance = "⭐ 高相关" if score < 0.8 else "  一般" if score < 1.2 else "  低相关"
+            relevance = (
+                "⭐ 高相关" if score < 0.8 else "  一般" if score < 1.2 else "  低相关"
+            )
             print(f"     [{i+1}] 距离={score:.4f} {relevance}")
             print(f"         来源: {doc.metadata['title']}")
             print(f"         内容: {doc.page_content[:60]}...")
@@ -209,6 +230,7 @@ try:
 
     # 清理临时文件
     import shutil
+
     shutil.rmtree(persist_dir, ignore_errors=True)
     print(f"\n  已清理临时目录")
 

@@ -28,15 +28,84 @@ from collections import Counter
 
 # 复用上一单元的停用词表（简化版）
 STOP_WORDS = {
-    "the", "be", "to", "of", "and", "a", "in", "that", "have", "i",
-    "it", "for", "not", "on", "with", "as", "you", "do", "at", "this",
-    "but", "by", "from", "they", "we", "or", "an", "will", "all",
-    "would", "there", "their", "what", "so", "up", "if", "about",
-    "who", "get", "which", "go", "me", "when", "can", "like", "no",
-    "just", "know", "into", "your", "some", "them", "see", "other",
-    "than", "then", "now", "only", "its", "also", "how", "our",
-    "is", "are", "was", "were", "been", "has", "had", "does", "did",
-    "click", "open", "enter", "step", "find", "type", "name",
+    "the",
+    "be",
+    "to",
+    "of",
+    "and",
+    "a",
+    "in",
+    "that",
+    "have",
+    "i",
+    "it",
+    "for",
+    "not",
+    "on",
+    "with",
+    "as",
+    "you",
+    "do",
+    "at",
+    "this",
+    "but",
+    "by",
+    "from",
+    "they",
+    "we",
+    "or",
+    "an",
+    "will",
+    "all",
+    "would",
+    "there",
+    "their",
+    "what",
+    "so",
+    "up",
+    "if",
+    "about",
+    "who",
+    "get",
+    "which",
+    "go",
+    "me",
+    "when",
+    "can",
+    "like",
+    "no",
+    "just",
+    "know",
+    "into",
+    "your",
+    "some",
+    "them",
+    "see",
+    "other",
+    "than",
+    "then",
+    "now",
+    "only",
+    "its",
+    "also",
+    "how",
+    "our",
+    "is",
+    "are",
+    "was",
+    "were",
+    "been",
+    "has",
+    "had",
+    "does",
+    "did",
+    "click",
+    "open",
+    "enter",
+    "step",
+    "find",
+    "type",
+    "name",
 }
 
 # ==========================================
@@ -46,20 +115,16 @@ documents = [
     """How to create a new session in the application. 
     Click the session button to start a new session. 
     Session management is available in the dashboard.""",
-
     """Remote machine configuration requires SSH keys. 
     Generate SSH keys using ssh-keygen command. 
     SSH connection uses port 22 by default. 
     Configure SSH server settings for remote access.""",
-
     """Session assignment allows administrators to assign 
     sessions to different users. Share session links 
     with team members for collaboration.""",
-
     """Troubleshooting SSH connection issues. 
     Check SSH keys and verify network connectivity. 
     Common SSH errors include permission denied and timeout.""",
-
     """The application pipeline processes documents 
     through multiple stages: ingestion, embedding, 
     and vector storage for semantic search.""",
@@ -95,7 +160,7 @@ print("-" * 40)
 
 # 选第二篇文档（SSH 相关）来演示
 target_doc = documents[1]
-print(f"  目标文档: \"{target_doc[:60]}...\"")
+print(f'  目标文档: "{target_doc[:60]}..."')
 print()
 
 # 提取所有有效词并统计词频
@@ -129,7 +194,9 @@ print(f"  {'─' * 65}")
 for word, score in ranked:
     tf_val = tf[word]
     idf_val = idf.get(word, 1.0)
-    interpretation = "⭐ 强关键词" if score > 3.0 else "一般词" if score > 1.5 else "弱信号"
+    interpretation = (
+        "⭐ 强关键词" if score > 3.0 else "一般词" if score > 1.5 else "弱信号"
+    )
     print(f"  {word:<20} {tf_val:<6} {idf_val:<8.3f} {score:<10.3f} {interpretation}")
 
 # ==========================================
@@ -142,12 +209,12 @@ print("-" * 40)
 def extract_tags(text: str, idf: dict, top_n: int = 6) -> list[str]:
     """
     这就是 test.py 中的 extract_tags() 函数。
-    
+
     参数:
       text   - 要提取标签的文本
       idf    - 预先计算好的 IDF 字典
       top_n  - 返回前 N 个标签
-    
+
     返回:
       按 TF-IDF 得分降序排列的关键词列表
     """
@@ -176,7 +243,7 @@ print("\n  各文档的自动标签:")
 for i, doc in enumerate(documents):
     tags = extract_tags(doc, idf, top_n=4)
     preview = doc.strip().split("\n")[0][:50]
-    print(f"\n  文档 {i+1}: \"{preview}...\"")
+    print(f'\n  文档 {i+1}: "{preview}..."')
     print(f"         标签: {tags}")
 
 # ==========================================

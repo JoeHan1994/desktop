@@ -124,7 +124,7 @@ try:
         "Configure the remote machine by importing the SSH profile template JSON file.",
     ]
 
-    print(f"  查询: \"{query}\"")
+    print(f'  查询: "{query}"')
     print(f"  候选文档数: {len(candidates)}")
     print()
 
@@ -232,16 +232,34 @@ try:
 
     with torch.no_grad():
         # 无标题
-        inputs1 = tokenizer(pairs_no_title, padding=True, truncation=True, return_tensors="pt", max_length=512)
-        prob_no_title = torch.sigmoid(model(**inputs1, return_dict=True).logits.view(-1).float()).item()
+        inputs1 = tokenizer(
+            pairs_no_title,
+            padding=True,
+            truncation=True,
+            return_tensors="pt",
+            max_length=512,
+        )
+        prob_no_title = torch.sigmoid(
+            model(**inputs1, return_dict=True).logits.view(-1).float()
+        ).item()
 
         # 有标题
-        inputs2 = tokenizer(pairs_with_title, padding=True, truncation=True, return_tensors="pt", max_length=512)
-        prob_with_title = torch.sigmoid(model(**inputs2, return_dict=True).logits.view(-1).float()).item()
+        inputs2 = tokenizer(
+            pairs_with_title,
+            padding=True,
+            truncation=True,
+            return_tensors="pt",
+            max_length=512,
+        )
+        prob_with_title = torch.sigmoid(
+            model(**inputs2, return_dict=True).logits.view(-1).float()
+        ).item()
 
     print(f"    无标题: prob = {prob_no_title:.4f}")
     print(f"    有标题: prob = {prob_with_title:.4f}")
-    print(f"    提升: {((prob_with_title - prob_no_title) / max(prob_no_title, 0.001)) * 100:.1f}%")
+    print(
+        f"    提升: {((prob_with_title - prob_no_title) / max(prob_no_title, 0.001)) * 100:.1f}%"
+    )
 
 except ImportError as e:
     print(f"\n  ⚠️ 缺少依赖: {e}")

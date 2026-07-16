@@ -12,15 +12,15 @@ test.py 的完整流程：
   用户提问 → 向量粗召回 → Reranker 精排 → 构建 Prompt → LLM 回答
 ```
 
-| 序号 | 文件 | 主题 | 对应 test.py 功能 | 依赖 |
-|------|------|------|-------------------|------|
-| 01 | `01_idf_basics.py` | IDF 逆文档频率 | `compute_idf()` | 无（纯 Python） |
-| 02 | `02_tfidf_tags.py` | TF-IDF 关键词提取 | `extract_tags()` | 无（纯 Python） |
-| 03 | `03_markdown_splitting.py` | Markdown 文本切块 | `MarkdownHeaderTextSplitter` + `RecursiveCharacterTextSplitter` | langchain-text-splitters |
-| 04 | `04_metadata_enrichment.py` | 文档元数据丰富化 | `process_markdown_file()` 中的元数据逻辑 | 无（纯 Python） |
-| 05 | `05_vectordb_chroma.py` | 向量数据库与语义搜索 | `OllamaEmbeddings` + `Chroma` | langchain-ollama, chromadb, **Ollama 服务** |
-| 06 | `06_reranker.py` | Reranker 重排序 | `bge-reranker-v2-m3` 两阶段精排 | torch, transformers |
-| 07 | `07_rag_pipeline.py` | RAG 完整流水线 | `ask()` 函数 + Prompt 构建 | langchain-ollama, **Ollama 服务** |
+| 序号 | 文件                        | 主题                 | 对应 test.py 功能                                               | 依赖                                        |
+| ---- | --------------------------- | -------------------- | --------------------------------------------------------------- | ------------------------------------------- |
+| 01   | `01_idf_basics.py`          | IDF 逆文档频率       | `compute_idf()`                                                 | 无（纯 Python）                             |
+| 02   | `02_tfidf_tags.py`          | TF-IDF 关键词提取    | `extract_tags()`                                                | 无（纯 Python）                             |
+| 03   | `03_markdown_splitting.py`  | Markdown 文本切块    | `MarkdownHeaderTextSplitter` + `RecursiveCharacterTextSplitter` | langchain-text-splitters                    |
+| 04   | `04_metadata_enrichment.py` | 文档元数据丰富化     | `process_markdown_file()` 中的元数据逻辑                        | 无（纯 Python）                             |
+| 05   | `05_vectordb_chroma.py`     | 向量数据库与语义搜索 | `OllamaEmbeddings` + `Chroma`                                   | langchain-ollama, chromadb, **Ollama 服务** |
+| 06   | `06_reranker.py`            | Reranker 重排序      | `bge-reranker-v2-m3` 两阶段精排                                 | torch, transformers                         |
+| 07   | `07_rag_pipeline.py`        | RAG 完整流水线       | `ask()` 函数 + Prompt 构建                                      | langchain-ollama, **Ollama 服务**           |
 
 ## 建议学习顺序
 

@@ -141,9 +141,7 @@ for i, doc in enumerate(retrieved_docs):
     video = f"\n  演示视频: {doc['video_links']}" if doc.get("video_links") else ""
 
     # 组装完整的片段
-    context_parts.append(
-        f"--- 片段 {i+1} {header}{related}{video}\n{doc['content']}"
-    )
+    context_parts.append(f"--- 片段 {i+1} {header}{related}{video}\n{doc['content']}")
 
 context = "\n\n".join(context_parts)
 
@@ -240,10 +238,12 @@ try:
     print("\n  正在连接 Ollama 并生成回答...")
     llm = ChatOllama(model="gemma4:e2b", base_url="http://localhost:11434")
 
-    response = llm.invoke([
-        SystemMessage(content=system_prompt),
-        HumanMessage(content=user_prompt),
-    ])
+    response = llm.invoke(
+        [
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=user_prompt),
+        ]
+    )
 
     print(f"\n  ✅ LLM 回答:")
     print(f"  {'─' * 50}")

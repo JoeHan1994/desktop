@@ -135,7 +135,9 @@ for i, chunk in enumerate(chunks):
 
     meta["char_count"] = len(chunk["content"])
 
-    print(f"  Chunk {i}: title=\"{meta['title']}\" | pos={meta['chunk_position']} | chars={meta['char_count']}")
+    print(
+        f"  Chunk {i}: title=\"{meta['title']}\" | pos={meta['chunk_position']} | chars={meta['char_count']}"
+    )
 
 # ==========================================
 # 第二步：内容类型推断
@@ -166,7 +168,7 @@ for i, chunk in enumerate(chunks):
     # 检测代码：包含反引号
     has_code = "`" in text
 
-    # 检测表格：同时包含 | 和 --- 
+    # 检测表格：同时包含 | 和 ---
     contains_table = "|" in text and "---" in text
 
     # 按优先级确定类型（表格 > 步骤 > 列表 > 纯文本）
@@ -179,7 +181,9 @@ for i, chunk in enumerate(chunks):
     else:
         content_type = "text"
 
-    print(f"  Chunk {i}: type={content_type:6s} | ordered={has_ordered_list} | unordered={has_unordered_list} | table={contains_table} | code={has_code}")
+    print(
+        f"  Chunk {i}: type={content_type:6s} | ordered={has_ordered_list} | unordered={has_unordered_list} | table={contains_table} | code={has_code}"
+    )
 
 # ==========================================
 # 第三步：视频链接检测

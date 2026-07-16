@@ -16,14 +16,8 @@
 			"shell": {
 				"all": false,
 				"open": true,
-				"sidecar": true,
-				"scope": [
-					{
-						"name": "knowledge-unit",
-						"cmd": "knowledge-unit",
-						"args": true
-					}
-				]
+				"sidecar": false,
+				"scope": []
 			},
 			"window": {
 				"all": false,
@@ -54,8 +48,7 @@
 			"active": true,
 			"targets": "all",
 			"identifier": "com.mytoolbox.app",
-			"icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.icns", "icons/icon.ico"],
-			"externalBin": ["binaries/knowledge-unit"]
+			"icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.icns", "icons/icon.ico"]
 		}
 	}
 }
