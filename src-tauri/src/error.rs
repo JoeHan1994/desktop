@@ -61,6 +61,9 @@ impl From<mysql::FromRowError> for AppError {
 impl From<russh::Error> for AppError {
     fn from(e: russh::Error) -> Self { Self::Ssh(e) }
 }
+impl From<reqwest::Error> for AppError {
+    fn from(e: reqwest::Error) -> Self { Self::Other(format!("Sidecar 请求错误：{e}")) }
+}
 impl From<String> for AppError {
     fn from(msg: String) -> Self { Self::Other(msg) }
 }

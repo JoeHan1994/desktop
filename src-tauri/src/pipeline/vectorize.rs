@@ -6,6 +6,7 @@
 use super::process::Chunk;
 use crate::domain::pipeline::VectorEntry;
 use crate::embed;
+use crate::error::Result;
 
 // ── Public API ────────────────────────────────────────────────────────────
 
@@ -13,10 +14,10 @@ use crate::embed;
 ///
 /// Call `embed::project_3d(&entry.embedding)` separately after all entries
 /// are embedded (so the projection matrix seed remains consistent).
-pub fn embed_chunk(chunk: &Chunk, created_date: &str) -> VectorEntry {
-    let embedding = embed::embed(&chunk.text);
+pub fn embed_chunk(chunk: &Chunk, created_date: &str) -> Result<VectorEntry> {
+    let embedding = embed::embed(&chunk.text)?;
     let id = chunk_id(&chunk.source, chunk.chunk_index);
-    VectorEntry {
+    Ok(VectorEntry {
         id,
         text: chunk.text.clone(),
         source: chunk.source.clone(),
@@ -24,7 +25,7 @@ pub fn embed_chunk(chunk: &Chunk, created_date: &str) -> VectorEntry {
         embedding,
         position: [0.0; 3],
         _chunk_index: chunk.chunk_index,
-    }
+    })
 }
 
 // ── Private helpers ───────────────────────────────────────────────────────

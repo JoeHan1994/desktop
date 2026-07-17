@@ -1,0 +1,206 @@
+/**
+ * TerraForge VitePress theme — custom CSS variables.
+ * Color palette sourced from src/styles/globals.css to keep visual consistency
+ * with the main application.
+ */
+
+/* ── Brand colors (dark/light) ────────────────────────────────────────────── */
+:root {
+  --vp-c-brand-1: hsl(217.2, 91.2%, 59.8%);
+  --vp-c-brand-2: hsl(217.2, 91.2%, 50%);
+  --vp-c-brand-3: hsl(217.2, 91.2%, 40%);
+  --vp-c-brand-soft: hsla(217.2, 91.2%, 59.8%, 0.14);
+
+  /* Light mode overrides */
+  --vp-c-bg: hsl(0, 0%, 97%);
+  --vp-c-bg-soft: hsl(0, 0%, 97.5%);
+  --vp-c-bg-mute: hsl(210, 40%, 90%);
+  --vp-c-bg-elv: hsl(0, 0%, 100%);
+  --vp-c-bg-alt: hsl(0, 0%, 93%);
+
+  --vp-c-text-1: hsl(222.2, 84%, 4.9%);
+  --vp-c-text-2: hsl(215.4, 16.3%, 40%);
+  --vp-c-text-3: hsl(215.4, 16.3%, 55%);
+
+  --vp-c-border: hsl(214.3, 31.8%, 88%);
+  --vp-c-divider: hsl(214.3, 31.8%, 88%);
+  --vp-c-gutter: hsl(214.3, 31.8%, 88%);
+}
+
+.dark {
+  /* Dark mode — matches TerraForge app dark theme exactly */
+  --vp-c-bg: hsl(222.2, 57%, 10%);
+  --vp-c-bg-soft: hsl(222.2, 57%, 11.5%);
+  --vp-c-bg-mute: hsl(217.2, 32.6%, 14%);
+  --vp-c-bg-elv: hsl(222.2, 57%, 11.5%);
+  --vp-c-bg-alt: hsl(222.2, 57%, 8%);
+
+  --vp-c-text-1: hsl(210, 40%, 98%);
+  --vp-c-text-2: hsl(215, 20.2%, 65.1%);
+  --vp-c-text-3: hsl(215, 20.2%, 50%);
+
+  --vp-c-border: hsl(217.2, 32.6%, 17.5%);
+  --vp-c-divider: hsl(217.2, 32.6%, 17.5%);
+  --vp-c-gutter: hsl(222.2, 57%, 8%);
+}
+
+/* ── Nav ──────────────────────────────────────────────────────────────────── */
+:root {
+  --vp-nav-bg-color: hsl(0, 0%, 97%);
+  --vp-nav-screen-bg-color: hsl(0, 0%, 97%);
+}
+
+.dark {
+  --vp-nav-bg-color: hsl(222.2, 57%, 7%);
+  --vp-nav-screen-bg-color: hsl(222.2, 57%, 7%);
+}
+
+/* ── Sidebar ──────────────────────────────────────────────────────────────── */
+:root {
+  --vp-sidebar-bg-color: hsl(0, 0%, 95%);
+  --vp-sidebar-width: 272px;
+}
+
+.dark {
+  --vp-sidebar-bg-color: hsl(222.2, 57%, 8%);
+}
+
+/* ── Code blocks ──────────────────────────────────────────────────────────── */
+:root {
+  --vp-code-block-bg: hsl(0, 0%, 93%);
+  --vp-code-line-highlight-color: hsla(214.3, 31.8%, 50%, 0.1);
+}
+
+.dark {
+  --vp-code-block-bg: hsl(222.2, 57%, 8%);
+  --vp-code-line-highlight-color: hsla(217.2, 91.2%, 59.8%, 0.08);
+}
+
+/* ── Custom badge / tip containers ──────────────────────────────────────── */
+.dark .custom-block.tip {
+  border-color: hsl(217.2, 91.2%, 35%);
+  background-color: hsla(217.2, 91.2%, 59.8%, 0.08);
+}
+
+.dark .custom-block.warning {
+  border-color: hsl(38, 92%, 35%);
+  background-color: hsla(38, 92%, 45%, 0.08);
+}
+
+.dark .custom-block.danger {
+  border-color: hsl(0, 62.8%, 35%);
+  background-color: hsla(0, 62.8%, 30.6%, 0.1);
+}
+
+/* ── Home page hero ───────────────────────────────────────────────────────── */
+.VPHero .name {
+  background: linear-gradient(135deg, hsl(217.2, 91.2%, 59.8%) 0%, hsl(199, 89%, 56%) 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.VPHero .text {
+  font-size: 2rem !important;
+  line-height: 1.2 !important;
+}
+
+@media (min-width: 640px) {
+  .VPHero .text {
+    font-size: 2.5rem !important;
+  }
+}
+
+@media (min-width: 960px) {
+  .VPHero .text {
+    font-size: 3rem !important;
+  }
+}
+
+.VPHero .image-container .image-src {
+  max-width: 520px !important;
+  max-height: 520px !important;
+}
+
+@media (min-width: 960px) {
+  .VPHero .image-container {
+    transform: scale(1.2);
+    transform-origin: center center;
+  }
+}
+
+/* ── Feature grid cards ───────────────────────────────────────────────────── */
+.VPFeature {
+  transition:
+    border-color 0.25s,
+    background-color 0.25s;
+}
+
+.VPFeature:hover {
+  border-color: hsl(217.2, 91.2%, 59.8%);
+  background-color: hsl(214.3, 31.8%, 95%);
+}
+
+.dark .VPFeature {
+  background-color: hsl(222.2, 57%, 11.5%);
+  border-color: hsl(217.2, 32.6%, 17.5%);
+}
+
+.dark .VPFeature:hover {
+  border-color: hsl(217.2, 91.2%, 40%);
+  background-color: hsl(222.2, 57%, 13%);
+}
+
+/* ── Table styles ─────────────────────────────────────────────────────────── */
+.dark .vp-doc table {
+  border-collapse: collapse;
+}
+
+.dark .vp-doc tr:nth-child(even) {
+  background-color: hsl(222.2, 57%, 11.5%);
+}
+
+.dark .vp-doc th {
+  background-color: hsl(217.2, 32.6%, 14%);
+  color: hsl(210, 40%, 98%);
+}
+
+/* ── Typography ───────────────────────────────────────────────────────────── */
+.vp-doc h1,
+.vp-doc h2,
+.vp-doc h3 {
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.vp-doc h2 {
+  border-top: 1px solid var(--vp-c-divider);
+  padding-top: 1.5rem;
+  margin-top: 2rem;
+}
+
+/* ── Mermaid diagrams ─────────────────────────────────────────────────────── */
+.mermaid {
+  background: transparent;
+  display: flex;
+  justify-content: center;
+  padding: 1.5rem 0;
+}
+
+/* ── Scrollbar (webkit) ───────────────────────────────────────────────────── */
+.dark ::-webkit-scrollbar {
+  width: 6px;
+}
+
+.dark ::-webkit-scrollbar-track {
+  background: hsl(222.2, 57%, 8%);
+}
+
+.dark ::-webkit-scrollbar-thumb {
+  background: hsl(217.2, 32.6%, 25%);
+  border-radius: 3px;
+}
+
+.dark ::-webkit-scrollbar-thumb:hover {
+  background: hsl(217.2, 32.6%, 35%);
+}

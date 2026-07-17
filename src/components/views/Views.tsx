@@ -8,6 +8,7 @@ import { Icon } from '@/components/ui/Icon';
 import { MarkdownContent } from '@/components/ui/MarkdownContent';
 import { useModelProviders, type ModelProvider, type ProviderType } from '@/features/models/ModelProvidersContext';
 import { streamChat, type LLMMessage, type TokenStats } from '@/services/llmClient';
+import { RagWorkspaceView } from './RagWorkspaceView';
 
 /* ------------------------------------------------------------------ */
 /* 共用：紧凑横向标题栏                                                 */
@@ -1369,6 +1370,7 @@ export function RagView() {
 			<div className="flex shrink-0 items-center justify-between gap-3">
 				<PageTitle stage="系统 · RAG" title="RAG Workspace" desc="设计检索、重排与引用校验流程" />
 			</div>
+			<RagWorkspaceView />
 		</div>
 	);
 }

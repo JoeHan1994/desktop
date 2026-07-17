@@ -44,9 +44,13 @@ pub async fn search_vectors(
         return Ok(vec![]);
     }
 
-    // 1. Embed query
+    // 1. Embed query（在阻塞线程中调用 sidecar HTTP，避免阻塞异步运行时）
     let t_embed = Instant::now();
-    let query_vec = embed::embed(&params.query);
+    let query = params.query.clone();
+    let query_vec = tokio::task::spawn_blocking(move || embed::embed(&query))
+        .await
+        .map_err(|e| format!("嵌入任务失败：{e}"))?
+        .map_err(|e| e.to_string())?;
     let embed_ms = t_embed.elapsed().as_secs_f32() * 1000.0;
 
     // 2. Brute-force cosine search

@@ -91,7 +91,13 @@ impl PipelineService {
         let today = process::today_date_str();
 
         for (i, chunk) in all_chunks.iter().enumerate() {
-            let entry = vectorize::embed_chunk(chunk, &today);
+            let entry = match vectorize::embed_chunk(chunk, &today) {
+                Ok(entry) => entry,
+                Err(e) => {
+                    eprintln!("[pipeline] 跳过块 {i}（embedding 失败）: {e}");
+                    continue;
+                }
+            };
             let vram = 1.2 + (i as f32 / total as f32) * 1.8;
             {
                 let mut g = self.lock();

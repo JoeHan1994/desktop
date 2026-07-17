@@ -25,6 +25,11 @@ use domain::pipeline::AppState;
 use mysql_profiles::MySqlProfileState;
 use remote::SshState;
 use tauri::Manager;
+use std::sync::Mutex;
+
+/// 持有 Python sidecar 子进程句柄，供 app 退出时终止。
+#[allow(dead_code)]
+struct SidecarState(Mutex<Option<tauri::api::process::CommandChild>>);
 
 // ── Windows-specific DWM window styling ──────────────────────────────────
 
@@ -55,6 +60,7 @@ fn apply_window_style(window: &tauri::Window) {
 fn main() {
     tauri::Builder::default()
         .manage(AppState::new())
+        .manage(SidecarState(Mutex::new(None)))
         .setup(|app| {
             let window = app.get_window("main").expect("no main window");
             #[cfg(target_os = "windows")]
@@ -74,7 +80,33 @@ fn main() {
                 .ok_or("failed to resolve app config dir")?;
             app.manage(MySqlProfileState::load(&config_dir));
 
+            // ── Python sidecar（仅在打包发布时启动；dev 模式由 run-tauri.mjs 负责）──
+            #[cfg(not(debug_assertions))]
+            {
+                use tauri::api::process::Command;
+                match Command::new_sidecar("sidecar")
+                    .map(|c| c.spawn())
+                {
+                    Ok(Ok((_rx, child))) => {
+                        *app.state::<SidecarState>().0.lock().unwrap() = Some(child);
+                    }
+                    Ok(Err(e)) => eprintln!("[sidecar] 启动失败：{e}"),
+                    Err(e)     => eprintln!("[sidecar] 无法创建命令：{e}"),
+                }
+            }
+
             Ok(())
+        })
+        .on_window_event(|event| {
+            if let tauri::WindowEvent::Destroyed = event.event() {
+                // 窗口销毁时终止 Python sidecar
+                #[cfg(not(debug_assertions))]
+                if let Some(child) = event.window()
+                    .state::<SidecarState>().0.lock().unwrap().take()
+                {
+                    let _ = child.kill();
+                }
+            }
         })
         .invoke_handler(tauri::generate_handler![
             // Vector pipeline

@@ -2,3 +2,7 @@
 /target
 
 # Tauri build icons placeholder
+
+# Python sidecar binary (built by PyInstaller before release; placeholder only in dev)
+/binaries/sidecar-*.exe
+/binaries/sidecar

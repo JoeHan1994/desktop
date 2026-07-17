@@ -2,6 +2,10 @@ langchain-text-splitters
 langchain-ollama
 langchain-community
 langchain-core
-chromadb
+langchain-qdrant
+qdrant-client
 torch
 transformers
+fastapi
+uvicorn[standard]
+pydantic

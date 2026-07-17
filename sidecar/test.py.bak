@@ -8,8 +8,9 @@ from langchain_text_splitters import (
     RecursiveCharacterTextSplitter,
 )
 from langchain_ollama import OllamaEmbeddings
-from langchain_community.vectorstores import Chroma
+from langchain_qdrant import QdrantVectorStore
 from langchain_core.documents import Document
+from qdrant_client import QdrantClient
 from langchain_core.messages import SystemMessage, HumanMessage
 
 # ==========================================
@@ -409,30 +410,29 @@ print(f"         Embedding 模型: bge-m3:567m (Ollama)")
 print(f"         Ollama 地址: http://localhost:11434")
 
 embedding_model = OllamaEmbeddings(
-    model="bge-m3:latest", base_url="http://localhost:11434"
+    model="bge-m3:latest", base_url="http://192.168.51.48:11434"
 )
-persist_directory = str(SCRIPT_DIR / "terraforge_knowledge_db_v2")
+COLLECTION_NAME = "terraforge_docs"
+persist_directory = str(SCRIPT_DIR / "terraforge_qdrant_db")
 print(f"         存储目录: {persist_directory}")
 
 # 清理旧数据，避免多次运行导致重复文档
-import chromadb
-
-chroma_client = chromadb.PersistentClient(path=persist_directory)
-# 删除默认集合（如存在）
-existing_collections = [c.name for c in chroma_client.list_collections()]
+qdrant_client = QdrantClient(path=persist_directory)
+# 删除已有集合（如存在）
+existing_collections = [c.name for c in qdrant_client.get_collections().collections]
 for col_name in existing_collections:
-    chroma_client.delete_collection(col_name)
+    qdrant_client.delete_collection(col_name)
     print(f"         已清理旧集合: {col_name}")
 
-db = Chroma.from_documents(
+db = QdrantVectorStore.from_documents(
     documents=all_documents,
     embedding=embedding_model,
-    persist_directory=persist_directory,
-    client=chroma_client,
+    collection_name=COLLECTION_NAME,
+    client=qdrant_client,
 )
 
 print(f"\n[完成] 写入成功!")
-print(f"       ChromaDB 集合数量: {db._collection.count()}")
+print(f"       Qdrant 集合文档数: {qdrant_client.count(COLLECTION_NAME).count}")
 print(f"       覆盖文件: {len(md_files)} 个")
 print(f"       总 Chunk 数: {len(all_documents)}")
 
@@ -444,7 +444,11 @@ from langchain_ollama import ChatOllama
 import torch
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
-llm = ChatOllama(model="gemma4:e2b", base_url="http://localhost:11434")
+llm = ChatOllama(
+    model="gemma4:e4b",
+    base_url="http://192.168.51.48:11434",
+    reasoning=False,
+)
 
 # 初始化 Reranker（首次运行会自动下载模型，约 1.1GB）
 # 临时指定模型缓存目录，不设置则默认存至 ~/.cache/huggingface/hub/
@@ -475,16 +479,17 @@ RERANK_PROB_THRESHOLD = 0.05
 # 最终提供给 LLM 的片段数量：多片段上下文优于单片段，避免答案空洞/跑题。
 RERANK_TOP_N = 3
 
-# 兼容旧函数 retrieve_with_scores 的向量距离阈值（主流程已改用 Reranker 精排）
-RELEVANCE_DISTANCE_THRESHOLD = 1.0
+# 兼容旧函数 retrieve_with_scores 的向量相似度阈值（主流程已改用 Reranker 精排）
+# Qdrant 余弦相似度：0~1，越大越相关（与 ChromaDB L2 距离语义相反）
+RELEVANCE_SCORE_THRESHOLD = 0.3
 
 
 def retrieve_with_scores(question: str) -> list[tuple[Document, float]]:
-    """检索并返回带距离分数的文档，过滤掉不相关的结果"""
+    """检索并返回带相似度分数的文档，过滤掉不相关的结果"""
     results = db.similarity_search_with_score(question, k=4)
-    # 只保留距离低于阈值的结果
+    # 只保留相似度高于阈值的结果
     return [
-        (doc, score) for doc, score in results if score < RELEVANCE_DISTANCE_THRESHOLD
+        (doc, score) for doc, score in results if score >= RELEVANCE_SCORE_THRESHOLD
     ]
 
 
@@ -520,16 +525,22 @@ def ask(question: str, docs: list[Document] | None = None) -> str:
 
 用户问题：{question}"""
 
-    response = llm.invoke(
+    print("\n💬 回答:\n", end="", flush=True)
+    full_response = ""
+    for chunk in llm.stream(
         [SystemMessage(content=system_prompt), HumanMessage(content=user_prompt)]
-    )
-    return str(response.content)
+    ):
+        token = str(chunk.content)
+        print(token, end="", flush=True)
+        full_response += token
+    print()
+    return full_response
 
 
 # 交互式问答循环
 print("\n" + "=" * 50)
 print("📖 Terraforge 文档问答系统已就绪")
-print("   模型: qwen2.5:3b | 向量库: ChromaDB")
+print("   模型: qwen2.5:3b | 向量库: Qdrant")
 print("   Reranker: bge-reranker-v2-m3 (multilingual)")
 print(
     f"   召回 {RETRIEVE_K} 个候选 → Reranker 精排 → 取前 {RERANK_TOP_N} 个 (相关概率>{RERANK_PROB_THRESHOLD})"
@@ -548,16 +559,18 @@ while True:
     #    跨语言 / 短查询时向量距离区分度低，这里不做距离硬过滤，只负责"召回"。
     print("\n⏳ 正在检索候选文档...")
     candidates = db.similarity_search_with_score(question, k=RETRIEVE_K)
-    print(f"   向量召回 {len(candidates)} 个候选（距离越小越近）:")
+    print(f"   向量召回 {len(candidates)} 个候选（相似度越大越近）:")
     for i, (doc, dist) in enumerate(candidates):
-        print(f"     [{i+1}] 距离={dist:.4f} | {doc.metadata['title']}")
+        print(f"     [{i+1}] 相似度={dist:.4f} | {doc.metadata['title']}")
 
     if not candidates:
         print(f"\n{'─' * 50}")
         print("📚 未召回任何文档，进入日常对话模式")
         print(f"{'─' * 50}")
-        response = llm.invoke(question)
-        print(f"\n💬 回答:\n{response.content}")
+        print("\n💬 回答:\n", end="", flush=True)
+        for chunk in llm.stream(question):
+            print(str(chunk.content), end="", flush=True)
+        print()
         continue
 
     # 2) Reranker 精排：对所有候选逐一打分（比向量距离更可靠）
@@ -604,7 +617,7 @@ while True:
         status = "✓ 采用" if used else "· 舍弃"
         best_mark = " ⭐" if i == 0 and used else ""
         print(
-            f"\n  ┌─ [{status}] rerank分数: {score:.4f} (相关概率: {prob:.3f}) | 向量距离: {vector_dist:.4f}{best_mark}"
+            f"\n  ┌─ [{status}] rerank分数: {score:.4f} (相关概率: {prob:.3f}) | 向量相似度: {vector_dist:.4f}{best_mark}"
         )
         print(f"  │ 来源: {m['source']}")
         print(f"  │ 章节: {m['title']}")
@@ -626,13 +639,14 @@ while True:
         print(f"\n{'─' * 50}")
         print("📚 Reranker 判定无相关文档（相关性不足），进入日常对话模式")
         print(f"{'─' * 50}")
-        response = llm.invoke(question)
-        print(f"\n💬 回答:\n{response.content}")
+        print("\n💬 回答:\n", end="", flush=True)
+        for chunk in llm.stream(question):
+            print(str(chunk.content), end="", flush=True)
+        print()
         continue
 
     # 4) 把 Top-N 个最相关片段一起交给 LLM（而不是只用 1 个），提供更充分的上下文
     top_docs = [doc for doc, _, _, _ in relevant]
     print(f"\n🤖 正在基于前 {len(top_docs)} 个最相关片段生成回答...")
 
-    answer = ask(question, top_docs)
-    print(f"\n💬 回答:\n{answer}")
+    ask(question, top_docs)
