@@ -2,6 +2,8 @@ langchain-text-splitters
 langchain-ollama
 langchain-community
 langchain-core
+langchain-chroma
+chromadb
 langchain-qdrant
 qdrant-client
 torch
@@ -9,3 +11,7 @@ transformers
 fastapi
 uvicorn[standard]
 pydantic
+PyYAML
+pypdf
+python-docx
+python-multipart

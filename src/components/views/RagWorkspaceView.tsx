@@ -2,7 +2,6 @@
 
 import React, { useState, useRef, useCallback, useEffect } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
-import { createPortal } from 'react-dom';
 
 /* ──────────────────────────────────────────────────────────────────────────
    Constants
@@ -227,102 +226,53 @@ function IngestBar() {
 }
 
 /* ──────────────────────────────────────────────────────────────────────────
-   Detail Modal (slide-in panel from the right)
+   Chunk Detail Panel (inline, right-panel)
    ────────────────────────────────────────────────────────────────────────── */
 
-function DetailModal({ item, onClose }: { item: DetailItem; onClose: () => void }) {
-	return createPortal(
-		<>
-			<motion.div
-				key="overlay"
-				initial={{ opacity: 0 }}
-				animate={{ opacity: 1 }}
-				exit={{ opacity: 0 }}
-				className="fixed inset-0 z-50 bg-black/50 backdrop-blur-sm"
-				onClick={onClose}
-			/>
-			<motion.div
-				key="panel"
-				initial={{ opacity: 0, x: 48, scale: 0.97 }}
-				animate={{ opacity: 1, x: 0, scale: 1 }}
-				exit={{ opacity: 0, x: 48, scale: 0.97 }}
-				transition={{ type: 'spring', stiffness: 280, damping: 26 }}
-				className="fixed bottom-4 right-4 top-4 z-50 flex w-[min(90vw,500px)] flex-col"
-			>
-				<div className="glass app-popover flex h-full flex-col overflow-hidden rounded-2xl shadow-2xl">
-					{/* Header */}
-					<div className="shrink-0 flex items-start justify-between gap-3 border-b border-white/[0.08] px-4 py-3">
-						<div className="min-w-0">
-							<div className="truncate text-xs font-semibold text-white">{item.title || item.source}</div>
-							<div className="mt-0.5 truncate text-[10px] text-white/35">{item.source}</div>
-						</div>
-						<button
-							type="button"
-							onClick={onClose}
-							className="glass glass-icon-button glass-control h-6 w-6 shrink-0 rounded-full"
-							aria-label="关闭"
-						>
-							<svg
-								viewBox="0 0 12 12"
-								className="h-3 w-3"
-								stroke="currentColor"
-								strokeWidth="1.6"
-								strokeLinecap="round"
-							>
-								<line x1="2" y1="2" x2="10" y2="10" />
-								<line x1="10" y1="2" x2="2" y2="10" />
-							</svg>
-						</button>
-					</div>
-
-					{/* Score bars */}
-					{item.scores && (
-						<div className="shrink-0 grid grid-cols-3 gap-3 border-b border-white/[0.06] px-4 py-3">
-							{item.scores.vector != null && (
-								<div>
-									<div className="mb-1 text-[9px] uppercase tracking-wider text-white/30">Vector Score</div>
-									<MiniBar value={item.scores.vector} color="#60a5fa" />
-									<div className="mt-1 font-mono text-[10px] text-blue-300">{item.scores.vector.toFixed(4)}</div>
-								</div>
-							)}
-							{item.scores.prob != null && (
-								<div>
-									<div className="mb-1 text-[9px] uppercase tracking-wider text-white/30">Rerank Prob</div>
-									<MiniBar value={item.scores.prob} color="#34d399" />
-									<div className="mt-1 font-mono text-[10px] text-emerald-300">{item.scores.prob.toFixed(4)}</div>
-								</div>
-							)}
-							{item.scores.rerank != null && (
-								<div>
-									<div className="mb-1 text-[9px] uppercase tracking-wider text-white/30">Rerank Logit</div>
-									<div className="font-mono text-[10px] text-purple-300">{item.scores.rerank.toFixed(4)}</div>
-								</div>
-							)}
+function ChunkDetailPanel({ item }: { item: DetailItem }) {
+	return (
+		<div className="space-y-3">
+			{item.scores && (
+				<div className="glass glass-control grid grid-cols-3 gap-3 rounded-xl px-4 py-3">
+					{item.scores.vector != null && (
+						<div>
+							<div className="mb-1 text-[9px] uppercase tracking-wider text-white/30">Vector Score</div>
+							<MiniBar value={item.scores.vector} color="#60a5fa" />
+							<div className="mt-1 font-mono text-[10px] text-blue-300">{item.scores.vector.toFixed(4)}</div>
 						</div>
 					)}
-
-					{/* Content */}
-					<div className="min-h-0 flex-1 space-y-3 overflow-y-auto px-4 py-3">
+					{item.scores.prob != null && (
 						<div>
-							<div className="mb-1.5 text-[9px] font-semibold uppercase tracking-wider text-white/35">文本内容</div>
-							<div className="glass glass-control rounded-xl p-3 text-[12px] leading-relaxed text-white/75 whitespace-pre-wrap">
-								{item.text}
-							</div>
+							<div className="mb-1 text-[9px] uppercase tracking-wider text-white/30">Rerank Prob</div>
+							<MiniBar value={item.scores.prob} color="#34d399" />
+							<div className="mt-1 font-mono text-[10px] text-emerald-300">{item.scores.prob.toFixed(4)}</div>
 						</div>
-
-						{item.metadata && Object.keys(item.metadata).length > 0 && (
-							<div>
-								<div className="mb-1.5 text-[9px] font-semibold uppercase tracking-wider text-white/35">元数据</div>
-								<pre className="glass glass-control overflow-x-auto rounded-xl p-3 font-mono text-[10px] text-white/50">
-									{JSON.stringify(item.metadata, null, 2)}
-								</pre>
-							</div>
-						)}
-					</div>
+					)}
+					{item.scores.rerank != null && (
+						<div>
+							<div className="mb-1 text-[9px] uppercase tracking-wider text-white/30">Rerank Logit</div>
+							<div className="font-mono text-[10px] text-purple-300">{item.scores.rerank.toFixed(4)}</div>
+						</div>
+					)}
 				</div>
-			</motion.div>
-		</>,
-		document.body,
+			)}
+
+			<div>
+				<div className="mb-1.5 text-[9px] font-semibold uppercase tracking-wider text-white/35">文本内容</div>
+				<div className="glass glass-control rounded-xl p-3 text-[12px] leading-relaxed text-white/75 whitespace-pre-wrap">
+					{item.text}
+				</div>
+			</div>
+
+			{item.metadata && Object.keys(item.metadata).length > 0 && (
+				<div>
+					<div className="mb-1.5 text-[9px] font-semibold uppercase tracking-wider text-white/35">元数据</div>
+					<pre className="glass glass-control overflow-x-auto rounded-xl p-3 font-mono text-[10px] text-white/50">
+						{JSON.stringify(item.metadata, null, 2)}
+					</pre>
+				</div>
+			)}
+		</div>
 	);
 }
 
@@ -776,118 +726,326 @@ function LlmAnswerCard({ question }: { question: string }) {
 }
 
 /* ──────────────────────────────────────────────────────────────────────────
-   Main: RagWorkspaceView
+   Main: RagWorkspaceView  —  左右分栏：左侧聊天，右侧召回详情
    ────────────────────────────────────────────────────────────────────────── */
 
+interface ChatMsg {
+	id: string;
+	role: 'user' | 'assistant';
+	content: string;
+	streaming?: boolean;
+	error?: string;
+}
+
 export function RagWorkspaceView() {
-	const [question, setQuestion] = useState('');
+	const [messages, setMessages] = useState<ChatMsg[]>([]);
+	const [input, setInput] = useState('');
+	const [sending, setSending] = useState(false);
 	const [tracing, setTracing] = useState(false);
-	const [traceResult, setTraceResult] = useState<TraceResult | null>(null);
+	const [activeTrace, setActiveTrace] = useState<TraceResult | null>(null);
 	const [traceError, setTraceError] = useState('');
-	const [showAnswer, setShowAnswer] = useState(false);
-	const [selectedItem, setSelectedItem] = useState<DetailItem | null>(null);
+	const [selectedChunk, setSelectedChunk] = useState<DetailItem | null>(null);
 
-	const handleRun = useCallback(async () => {
-		const q = question.trim();
-		if (!q || tracing) return;
+	const messagesEndRef = useRef<HTMLDivElement>(null);
+	const cancelRef = useRef(false);
 
-		setTracing(true);
-		setTraceResult(null);
+	useEffect(() => {
+		messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+	}, [messages]);
+
+	const handleSend = useCallback(async () => {
+		const q = input.trim();
+		if (!q || sending || tracing) return;
+
+		const userMsgId = crypto.randomUUID();
+		const assistantMsgId = crypto.randomUUID();
+		cancelRef.current = false;
+
+		setInput('');
+		setSelectedChunk(null);
 		setTraceError('');
-		setShowAnswer(false);
-		setSelectedItem(null);
+		setMessages((prev) => [
+			...prev,
+			{ id: userMsgId, role: 'user', content: q },
+			{ id: assistantMsgId, role: 'assistant', content: '', streaming: true },
+		]);
+		setTracing(true);
+		setSending(true);
 
-		try {
-			const res = await fetch(`${SIDECAR_BASE}/qa/trace`, {
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ question: q }),
-			});
+		// 并行：trace（右侧面板）+ 流式回答（左侧消息）
+		const tracePromise = fetch(`${SIDECAR_BASE}/qa/trace`, {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ question: q }),
+		})
+			.then(async (res) => {
+				if (!res.ok) throw new Error(`HTTP ${res.status}`);
+				return res.json() as Promise<TraceResult>;
+			})
+			.then((data) => { setActiveTrace(data); })
+			.catch((e) => { setTraceError(e instanceof Error ? e.message : String(e)); })
+			.finally(() => setTracing(false));
 
-			if (!res.ok) {
-				const detail = await res.text().catch(() => '');
-				throw new Error(`HTTP ${res.status}${detail ? `: ${detail}` : ''}`);
+		const answerPromise = (async () => {
+			try {
+				const res = await fetch(`${SIDECAR_BASE}/qa/ask`, {
+					method: 'POST',
+					headers: { 'Content-Type': 'application/json' },
+					body: JSON.stringify({ question: q }),
+				});
+				if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
+
+				const reader = res.body.getReader();
+				const decoder = new TextDecoder();
+				let full = '';
+
+				while (!cancelRef.current) {
+					const { done, value } = await reader.read();
+					if (done) break;
+					full += decoder.decode(value, { stream: true });
+					const snapshot = full;
+					setMessages((prev) =>
+						prev.map((m) => (m.id === assistantMsgId ? { ...m, content: snapshot } : m)),
+					);
+				}
+				setMessages((prev) =>
+					prev.map((m) => (m.id === assistantMsgId ? { ...m, streaming: false } : m)),
+				);
+			} catch (e) {
+				setMessages((prev) =>
+					prev.map((m) =>
+						m.id === assistantMsgId
+							? { ...m, streaming: false, error: e instanceof Error ? e.message : String(e) }
+							: m,
+					),
+				);
+			} finally {
+				setSending(false);
 			}
+		})();
 
-			const data: TraceResult = await res.json();
-			setTraceResult(data);
-			setShowAnswer(true);
-		} catch (e) {
-			setTraceError(e instanceof Error ? e.message : String(e));
-		} finally {
-			setTracing(false);
-		}
-	}, [question, tracing]);
+		await Promise.all([tracePromise, answerPromise]);
+	}, [input, sending, tracing]);
 
 	function handleKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
 		if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
 			e.preventDefault();
-			handleRun();
+			handleSend();
 		}
 	}
 
+	const busy = sending || tracing;
+
 	return (
-		<div className="flex h-full min-h-0 flex-col gap-3 overflow-hidden">
-			{/* ── Ingest bar ─────────────────────────────────────────────── */}
-			<IngestBar />
+		<div className="flex h-full min-h-0 gap-3 overflow-hidden">
 
-			{/* ── Input bar ──────────────────────────────────────────────────── */}
-			<div className="glass app-card shrink-0 flex items-end gap-3 rounded-2xl px-4 py-3">
-				<textarea
-					value={question}
-					onChange={(e) => setQuestion(e.target.value)}
-					onKeyDown={handleKeyDown}
-					rows={2}
-					disabled={tracing}
-					placeholder="输入问题，按 Ctrl+Enter 运行 RAG 管道…"
-					className="flex-1 resize-none bg-transparent text-sm text-white placeholder:text-white/25 focus:outline-none disabled:opacity-50"
-				/>
-				<button
-					type="button"
-					onClick={handleRun}
-					disabled={!question.trim() || tracing}
-					className="glass glass-control h-9 shrink-0 rounded-xl px-4 text-xs font-medium text-white transition-colors hover:bg-white/[0.07] disabled:cursor-not-allowed disabled:opacity-30"
-				>
-					{tracing ? (
-						<span className="flex items-center gap-1.5">
-							<motion.span
-								className="block h-3 w-3 rounded-full border border-white/40 border-t-white"
-								animate={{ rotate: 360 }}
-								transition={{ duration: 0.8, repeat: Infinity, ease: 'linear' }}
-							/>
-							追踪中
-						</span>
-					) : (
-						'▶ 运行'
+			{/* ── LEFT: Chat ──────────────────────────────────────────────── */}
+			<div className="glass app-card flex w-[44%] shrink-0 flex-col overflow-hidden rounded-2xl">
+
+				{/* header */}
+				<div className="shrink-0 flex items-center gap-2.5 border-b border-white/[0.06] px-4 py-3">
+					<span className="glass glass-chip px-2.5 py-0.5 card-label">Chat</span>
+					<span className="text-sm font-semibold card-title">知识库对话</span>
+					{busy && (
+						<div className="ml-auto flex items-center gap-1">
+							{[0, 1, 2].map((i) => (
+								<motion.div
+									key={i}
+									className="h-1.5 w-1.5 rounded-full bg-emerald-400/60"
+									animate={{ opacity: [0.3, 1, 0.3] }}
+									transition={{ duration: 1, repeat: Infinity, delay: i * 0.18 }}
+								/>
+							))}
+						</div>
 					)}
-				</button>
+					{messages.length > 0 && !busy && (
+						<button
+							type="button"
+							onClick={() => { setMessages([]); setActiveTrace(null); setSelectedChunk(null); }}
+							className="ml-auto glass glass-icon-button glass-control h-6 w-6 rounded-full text-white/30 hover:text-white/70"
+							title="清空对话"
+						>
+							<svg viewBox="0 0 12 12" className="h-3 w-3" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" fill="none">
+								<line x1="2" y1="2" x2="10" y2="10" /><line x1="10" y1="2" x2="2" y2="10" />
+							</svg>
+						</button>
+					)}
+				</div>
+
+				{/* messages */}
+				<div className="min-h-0 flex-1 overflow-y-auto px-4 py-4 space-y-4">
+					{messages.length === 0 && (
+						<div className="flex h-full flex-col items-center justify-center gap-3 py-12 text-white/20">
+							<svg viewBox="0 0 40 40" className="h-10 w-10" fill="none" stroke="currentColor" strokeWidth="1.3">
+								<circle cx="20" cy="20" r="16" />
+								<path d="M13 17a7 7 0 0114 0c0 4-3.5 5.5-7 8.5" />
+								<circle cx="20" cy="30" r="1.5" fill="currentColor" />
+							</svg>
+							<div className="text-center">
+								<div className="text-sm font-medium">向知识库 AI 提问以开始对话</div>
+								<div className="mt-0.5 text-xs opacity-60">基于本地向量检索增强生成 (RAG)</div>
+							</div>
+						</div>
+					)}
+
+					<AnimatePresence initial={false}>
+						{messages.map((msg) => (
+							<motion.div
+								key={msg.id}
+								initial={{ opacity: 0, y: 8 }}
+								animate={{ opacity: 1, y: 0 }}
+								transition={{ type: 'spring', stiffness: 280, damping: 26 }}
+								className={`flex gap-2.5 ${
+									msg.role === 'user' ? 'justify-end' : 'items-start'
+								}`}
+							>
+								{msg.role === 'assistant' && (
+									<div className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-[rgb(var(--accent-rgb))]/20 text-[10px] font-bold" style={{ color: 'rgb(var(--accent-rgb))' }}>
+										AI
+									</div>
+								)}
+								<div className={msg.role === 'user' ? 'max-w-[82%]' : 'min-w-0 flex-1'}>
+									<div className={`rounded-2xl px-3.5 py-2.5 text-[13px] leading-relaxed whitespace-pre-wrap ${
+										msg.role === 'user'
+											? 'glass glass-control text-white/90'
+											: 'text-white/80'
+									}`}>
+										{msg.error ? (
+											<span className="text-rose-400">{msg.error}</span>
+										) : (
+											<>
+												{msg.streaming && !msg.content
+													? <span className="text-white/25">思考中…</span>
+													: msg.content
+												}
+												{msg.streaming && (
+													<span className="ml-0.5 inline-block h-3.5 w-0.5 animate-pulse bg-emerald-400/80 align-text-bottom" />
+												)}
+											</>
+										)}
+									</div>
+								</div>
+								{msg.role === 'user' && (
+									<div className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full glass glass-control text-[10px] font-bold text-white/40">
+										U
+									</div>
+								)}
+							</motion.div>
+						))}
+					</AnimatePresence>
+					<div ref={messagesEndRef} />
+				</div>
+
+				{/* input */}
+				<div className="shrink-0 border-t border-white/[0.06] p-3">
+					<div className="flex items-end gap-2">
+						<textarea
+							value={input}
+							onChange={(e) => setInput(e.target.value)}
+							onKeyDown={handleKeyDown}
+							rows={2}
+							disabled={busy}
+							placeholder="向知识库 AI 提问…  Ctrl+Enter 发送"
+							className="min-h-0 flex-1 resize-none bg-transparent text-[13px] text-white placeholder:text-white/20 focus:outline-none disabled:opacity-40"
+						/>
+						<button
+							type="button"
+							onClick={handleSend}
+							disabled={!input.trim() || busy}
+							className="glass glass-control h-9 shrink-0 rounded-xl px-4 text-[12px] font-medium text-white transition-colors hover:bg-white/[0.07] disabled:opacity-30"
+						>
+							{busy ? (
+								<span className="flex items-center gap-1.5">
+									<motion.span
+										className="block h-3 w-3 rounded-full border border-white/40 border-t-white"
+										animate={{ rotate: 360 }}
+										transition={{ duration: 0.8, repeat: Infinity, ease: 'linear' }}
+									/>
+									处理中
+								</span>
+							) : '发送'}
+						</button>
+					</div>
+				</div>
 			</div>
 
-			{/* ── Error banner ────────────────────────────────────────────── */}
-			{traceError && (
-				<motion.div
-					initial={{ opacity: 0, y: -4 }}
-					animate={{ opacity: 1, y: 0 }}
-					className="glass app-card shrink-0 rounded-xl px-4 py-2.5 text-[12px] text-rose-400"
-				>
-					⚠ {traceError}
-				</motion.div>
-			)}
+			{/* ── RIGHT: IngestBar + Trace / Chunk detail ─────────────────── */}
+			<div className="flex min-w-0 flex-1 flex-col gap-3 overflow-hidden">
+				<IngestBar />
 
-			{/* ── Trace steps (scrollable) ──────────────────────────────── */}
-			<div className="min-h-0 flex-1 space-y-2.5 overflow-y-auto pr-0.5">
-				{traceResult &&
-					traceResult.steps.map((step, i) => (
-						<TraceStepCard key={step.step_id} step={step} index={i} onItemClick={setSelectedItem} />
-					))}
+				{traceError && (
+					<div className="glass app-card shrink-0 rounded-xl px-4 py-2.5 text-[12px] text-rose-400">
+						⚠ {traceError}
+					</div>
+				)}
 
-				{showAnswer && traceResult && <LlmAnswerCard key={traceResult.question} question={traceResult.question} />}
+				{/* trace / detail panel */}
+				<div className="glass app-card min-h-0 flex-1 flex flex-col overflow-hidden rounded-2xl">
+					{/* panel header */}
+					<div className="shrink-0 flex items-center gap-2.5 border-b border-white/[0.06] px-4 py-3">
+						{selectedChunk ? (
+							<>
+								<button
+									type="button"
+									onClick={() => setSelectedChunk(null)}
+									className="glass glass-icon-button glass-control h-6 w-6 shrink-0 rounded-full text-white/40 hover:text-white/80"
+									title="返回召回列表"
+								>
+									<svg viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" className="h-3 w-3">
+										<path d="M8 2L4 6l4 4" />
+									</svg>
+								</button>
+								<div className="min-w-0 flex-1">
+									<div className="truncate text-xs font-semibold text-white">{selectedChunk.title || selectedChunk.source}</div>
+									<div className="truncate text-[10px] text-white/30">{selectedChunk.source}</div>
+								</div>
+							</>
+						) : (
+							<>
+								<span className="glass glass-chip px-2.5 py-0.5 card-label">RAG</span>
+								<span className="text-sm font-semibold card-title">召回详情</span>
+								{tracing && (
+									<motion.div
+										className="ml-auto h-2 w-2 rounded-full bg-amber-400"
+										animate={{ opacity: [1, 0.3, 1] }}
+										transition={{ duration: 1, repeat: Infinity }}
+									/>
+								)}
+							</>
+						)}
+					</div>
+
+					{/* panel body */}
+					<div className="min-h-0 flex-1 overflow-y-auto p-3">
+						{selectedChunk ? (
+							<ChunkDetailPanel item={selectedChunk} />
+						) : tracing ? (
+							<div className="flex flex-col items-center justify-center gap-3 py-16 text-white/25">
+								<motion.div
+									className="h-6 w-6 rounded-full border-2 border-amber-400/40 border-t-amber-400"
+									animate={{ rotate: 360 }}
+									transition={{ duration: 1, repeat: Infinity, ease: 'linear' }}
+								/>
+								<span className="text-xs">正在检索与重排…</span>
+							</div>
+						) : activeTrace ? (
+							<div className="space-y-2.5">
+								{activeTrace.steps.map((step, i) => (
+									<TraceStepCard key={step.step_id} step={step} index={i} onItemClick={setSelectedChunk} />
+								))}
+							</div>
+						) : (
+							<div className="flex flex-col items-center justify-center gap-2.5 py-16 text-white/20">
+								<svg viewBox="0 0 24 24" className="h-8 w-8" fill="none" stroke="currentColor" strokeWidth="1.4">
+									<circle cx="11" cy="11" r="7" />
+									<path d="M16.5 16.5l4 4" strokeLinecap="round" />
+								</svg>
+								<span className="text-xs">发送问题后将在此显示召回详情</span>
+							</div>
+						)}
+					</div>
+				</div>
 			</div>
-
-			{/* ── Detail modal ───────────────────────────────────────────── */}
-			<AnimatePresence>
-				{selectedItem && <DetailModal key="detail" item={selectedItem} onClose={() => setSelectedItem(null)} />}
-			</AnimatePresence>
 		</div>
 	);
 }

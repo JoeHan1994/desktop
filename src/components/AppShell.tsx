@@ -7,12 +7,16 @@ import { ThemeConfigurator } from '@/features/theme/ThemeConfigurator';
 import type { ViewId } from '@/features/nav/navConfig';
 import { AssistantView, RagView, SettingsView } from '@/components/views/Views';
 import { RemoteMachineView } from '@/features/remote/RemoteMachineView';
+import { VectorDbView } from '@/features/vectordb/VectorDbView';
+import { IngestionPipelineView } from '@/features/pipeline/IngestionPipelineView';
 
 const VIEWS: Record<ViewId, () => JSX.Element> = {
 	assistant: AssistantView,
 	rag: RagView,
 	settings: SettingsView,
 	remote: RemoteMachineView,
+	vectordb: VectorDbView,
+	'ingestion-pipeline': IngestionPipelineView,
 };
 
 type TauriAppWindow = typeof import('@tauri-apps/api/window').appWindow;

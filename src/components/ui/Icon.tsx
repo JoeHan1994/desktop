@@ -168,6 +168,45 @@ const PATHS: Record<string, React.ReactNode> = {
 			<path d="m6 6 12 12" />
 		</>
 	),
+	layers: (
+		<>
+			<path d="m12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83Z" />
+			<path d="m22 17.65-9.17 4.16a2 2 0 0 1-1.66 0L2 17.65" />
+			<path d="m22 12.65-9.17 4.16a2 2 0 0 1-1.66 0L2 12.65" />
+		</>
+	),
+	flow: (
+		<>
+			<rect x="3" y="3" width="5" height="5" rx="1" />
+			<rect x="16" y="3" width="5" height="5" rx="1" />
+			<rect x="16" y="16" width="5" height="5" rx="1" />
+			<rect x="3" y="16" width="5" height="5" rx="1" />
+			<path d="M8 5.5h8" />
+			<path d="M8 18.5h8" />
+			<path d="M18.5 8v8" />
+			<path d="M5.5 8v8" />
+		</>
+	),
+	'chevron-left': (
+		<>
+			<path d="m15 18-6-6 6-6" />
+		</>
+	),
+	'chevron-right': (
+		<>
+			<path d="m9 18 6-6-6-6" />
+		</>
+	),
+	'chevron-up': (
+		<>
+			<path d="m18 15-6-6-6 6" />
+		</>
+	),
+	'chevron-down': (
+		<>
+			<path d="m6 9 6 6 6-6" />
+		</>
+	),
 };
 
 export interface IconProps extends SVGProps<SVGSVGElement> {

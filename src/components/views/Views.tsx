@@ -901,23 +901,15 @@ function TokenViz({
 	);
 }
 
+const SIDECAR_BASE = 'http://127.0.0.1:8765';
+
 export function AssistantView() {
-	const { providers } = useModelProviders();
 	const [messages, setMessages] = useState<ChatMessage[]>([]);
 	const [input, setInput] = useState('');
-	const [model, setModel] = useState<ModelProvider | null>(null);
 	const [isGenerating, setIsGenerating] = useState(false);
 	const [error, setError] = useState<string | null>(null);
-	const [latestStats, setLatestStats] = useState<TokenStats | undefined>(undefined);
 	const abortRef = useRef<AbortController | null>(null);
 	const bottomRef = useRef<HTMLDivElement>(null);
-
-	// 当 providers 列表变化时，确保选中项有效
-	useEffect(() => {
-		if (!model || !providers.find((p) => p.id === model.id)) {
-			setModel(providers[0] ?? null);
-		}
-	}, [providers]); // eslint-disable-line react-hooks/exhaustive-deps
 
 	// 新消息到达时自动滚到底部
 	useEffect(() => {
@@ -925,11 +917,9 @@ export function AssistantView() {
 		bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
 	}, [messages.length]);
 
-	const effectiveModel = model ?? providers[0] ?? null;
-
 	const handleSend = useCallback(async () => {
 		const text = input.trim();
-		if (!text || !effectiveModel || isGenerating) return;
+		if (!text || isGenerating) return;
 
 		setError(null);
 
@@ -957,63 +947,45 @@ export function AssistantView() {
 		const abort = new AbortController();
 		abortRef.current = abort;
 
-		// 把当前 messages + 新 userMsg 转成 LLMMessage[]
-		const history: LLMMessage[] = [...messages, userMsg].map((m) => ({
-			role: m.role as LLMMessage['role'],
-			content: m.content,
-		}));
-
-		let accumulated = '';
-		const startTs = Date.now();
-
 		try {
-			for await (const chunk of streamChat(effectiveModel, history, abort.signal)) {
-				if (chunk.content) {
-					accumulated += chunk.content;
-					const tokenCount = estimateTokens(accumulated);
-					const elapsed = (Date.now() - startTs) / 1000;
-					const tps = elapsed > 0.1 ? tokenCount / elapsed : 0;
+			const res = await fetch(`${SIDECAR_BASE}/qa/ask`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ question: text }),
+				signal: abort.signal,
+			});
 
-					setMessages((prev) =>
-						prev.map((m) =>
-							m.id === assistantId
-								? { ...m, content: accumulated, tokens: tokenCount, tokensPerSec: parseFloat(tps.toFixed(1)) }
-								: m,
-						),
-					);
-				}
-				// 最终 chunk: 更新真实统计
-				if (chunk.done) {
-					if (chunk.stats) {
-						setLatestStats(chunk.stats);
-						// 用真实 token 数更新 assistant 消息
-						setMessages((prev) =>
-							prev.map((m) =>
-								m.id === assistantId
-									? {
-											...m,
-											tokens: chunk.stats!.completionTokens,
-											tokensPerSec: parseFloat(chunk.stats!.outputTps.toFixed(1)),
-										}
-									: m,
-							),
-						);
-					}
-					break;
-				}
+			if (!res.ok || !res.body) {
+				const detail = await res.text().catch(() => '');
+				throw new Error(`HTTP ${res.status}${detail ? `: ${detail}` : ''}`);
+			}
+
+			const reader = res.body.getReader();
+			const decoder = new TextDecoder();
+			let accumulated = '';
+
+			while (true) {
+				const { done, value } = await reader.read();
+				if (done) break;
+				accumulated += decoder.decode(value, { stream: true });
+				const tokenCount = estimateTokens(accumulated);
+				setMessages((prev) =>
+					prev.map((m) =>
+						m.id === assistantId ? { ...m, content: accumulated, tokens: tokenCount } : m,
+					),
+				);
 			}
 		} catch (err) {
 			const e = err as Error;
 			if (e.name !== 'AbortError') {
 				setError(e.message);
-				// 若 assistant 气泡是空的则移除，避免留下空白占位
 				setMessages((prev) => prev.filter((m) => !(m.id === assistantId && m.content === '')));
 			}
 		} finally {
 			setIsGenerating(false);
 			abortRef.current = null;
 		}
-	}, [input, effectiveModel, isGenerating, messages]);
+	}, [input, isGenerating]);
 
 	function handleStop() {
 		abortRef.current?.abort();
@@ -1023,7 +995,6 @@ export function AssistantView() {
 		if (isGenerating) abortRef.current?.abort();
 		setMessages([]);
 		setError(null);
-		setLatestStats(undefined);
 	}
 
 	function handleKey(e: React.KeyboardEvent<HTMLInputElement>) {
@@ -1033,7 +1004,7 @@ export function AssistantView() {
 		}
 	}
 
-	const canSend = !!input.trim() && !!effectiveModel && !isGenerating;
+	const canSend = !!input.trim() && !isGenerating;
 
 	return (
 		<div className="flex h-full min-h-0 gap-3 overflow-hidden">
@@ -1058,10 +1029,8 @@ export function AssistantView() {
 								</svg>
 							</div>
 							<div>
-								<p className="text-sm font-medium text-white/40">向 AI 助手提问以开始对话</p>
-								{!effectiveModel && (
-									<p className="mt-1 text-[11px] text-rose-400/70">请先在「设置」页面添加 Model Provider</p>
-								)}
+								<p className="text-sm font-medium text-white/40">向知识库 AI 提问以开始对话</p>
+								<p className="mt-1 text-[11px] text-white/25">基于本地向量检索增强生成（RAG）</p>
 							</div>
 						</div>
 					)}
@@ -1183,9 +1152,7 @@ export function AssistantView() {
 
 					<input
 						className="flex-1 bg-transparent text-sm text-white placeholder:text-white/30 focus:outline-none"
-						placeholder={effectiveModel ? `向 ${effectiveModel.name} 提问…` : '请先配置 Model Provider…'}
-						value={input}
-						disabled={isGenerating}
+					placeholder="向知识库 AI 提问…"
 						onChange={(e) => setInput(e.target.value)}
 						onKeyDown={handleKey}
 					/>
@@ -1226,10 +1193,9 @@ export function AssistantView() {
 				</div>
 			</div>
 
-			{/* ── 右：模型选择 + Token 可视化 ── */}
+			{/* ── 右：Token 可视化 ── */}
 			<div className="hidden min-h-0 flex-[3] flex-col gap-3 overflow-y-auto md:flex">
-				<ModelSelector selected={model} onChange={setModel} />
-				<TokenViz messages={messages} ctxLimit={32768} latestStats={latestStats} />
+				<TokenViz messages={messages} ctxLimit={32768} />
 			</div>
 		</div>
 	);
