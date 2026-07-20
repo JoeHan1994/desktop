@@ -8,7 +8,19 @@ import { Icon } from '@/components/ui/Icon';
 import { MarkdownContent } from '@/components/ui/MarkdownContent';
 import { useModelProviders, type ModelProvider, type ProviderType } from '@/features/models/ModelProvidersContext';
 import { streamChat, type LLMMessage, type TokenStats } from '@/services/llmClient';
+import {
+	listDatabaseConfigs,
+	upsertDatabaseConfig,
+	deleteDatabaseConfig,
+	listApiDocuments,
+	parseApiDocument,
+	deleteApiDocument,
+	type DatabaseConfigPayload,
+	type ApiDocumentPayload,
+} from '@/services/tauriBridge';
 import { RagWorkspaceView } from './RagWorkspaceView';
+
+const hasTauri = () => typeof window !== 'undefined' && '__TAURI__' in window;
 
 /* ------------------------------------------------------------------ */
 /* 共用：紧凑横向标题栏                                                 */
@@ -517,10 +529,56 @@ function ProviderRow({
 }
 
 /* ------------------------------------------------------------------ */
-/* Settings 视图                                                        */
+/* Settings 视图（三段式配置中心）                                       */
 /* ------------------------------------------------------------------ */
 
+type SettingsTab = 'models' | 'database' | 'api';
+
+const SETTINGS_TABS: { id: SettingsTab; label: string }[] = [
+	{ id: 'models', label: 'Model Providers' },
+	{ id: 'database', label: 'Database' },
+	{ id: 'api', label: 'API Interfaces' },
+];
+
 export function SettingsView() {
+	const [tab, setTab] = useState<SettingsTab>('models');
+
+	return (
+		<div className="flex h-full flex-col gap-4 overflow-hidden">
+			{/* 顶部：标题 + 分段切换 */}
+			<div className="flex shrink-0 items-center gap-3">
+				<span className="glass glass-chip px-2.5 py-0.5 card-label">系统 · Settings</span>
+				<div className="glass app-card-surface flex items-center gap-1 rounded-full p-1">
+					{SETTINGS_TABS.map((t) => (
+						<button
+							key={t.id}
+							type="button"
+							onClick={() => setTab(t.id)}
+							className={`glass-control rounded-full px-3.5 py-1.5 text-xs font-medium transition-colors ${
+								tab === t.id ? 'bg-white/[0.1] text-white' : 'text-white/45 hover:text-white/75'
+							}`}
+						>
+							{t.label}
+						</button>
+					))}
+				</div>
+			</div>
+
+			{/* 分段内容 */}
+			<div className="flex min-h-0 flex-1 flex-col">
+				{tab === 'models' && <ModelProvidersSection />}
+				{tab === 'database' && <DatabaseSection />}
+				{tab === 'api' && <ApiInterfacesSection />}
+			</div>
+		</div>
+	);
+}
+
+/* ------------------------------------------------------------------ */
+/* Section · Model Providers                                            */
+/* ------------------------------------------------------------------ */
+
+function ModelProvidersSection() {
 	const { providers, saveProvider, removeProvider } = useModelProviders();
 	const [editingProvider, setEditingProvider] = useState<ModelProvider | null>(null);
 	const [modalOpen, setModalOpen] = useState(false);
@@ -546,34 +604,27 @@ export function SettingsView() {
 		}
 	}
 
-	function deleteProvider(id: string) {
-		removeProvider(id);
-	}
-
 	return (
-		<div className="flex h-full flex-col gap-4 overflow-hidden">
-			{/* 标题 + New 按钮 */}
+		<div className="flex min-h-0 flex-1 flex-col gap-3">
 			<div className="flex shrink-0 items-center justify-between">
-				<PageTitle stage="系统 · Settings" title="Model Providers" desc="管理本地与云端模型接入配置" />
+				<h2 className="text-sm font-semibold tracking-tight card-title">管理本地与云端模型接入配置</h2>
 				<motion.button
 					type="button"
 					whileHover={{ scale: 1.04 }}
 					whileTap={{ scale: 0.96 }}
-					onClick={() => openNew()}
+					onClick={openNew}
 					className="glass glass-button glass-control rounded-xl px-3.5 py-1.5 text-sm font-medium"
 				>
 					<svg viewBox="0 0 12 12" className="h-3 w-3" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
 						<line x1="6" y1="1" x2="6" y2="11" />
 						<line x1="1" y1="6" x2="11" y2="6" />
 					</svg>
-					New
+					New Provider
 				</motion.button>
 			</div>
 
-			{/* 列表 */}
 			<div className="min-h-0 flex-1 overflow-y-auto">
 				{providers.length === 0 ? (
-					/* 空状态 */
 					<div className="flex h-full flex-col items-center justify-center gap-3 text-center">
 						<div className="glass glass-control flex h-14 w-14 items-center justify-center rounded-2xl">
 							<svg
@@ -592,7 +643,7 @@ export function SettingsView() {
 						</div>
 						<div>
 							<p className="text-sm font-medium text-white/50">暂无 Model Provider</p>
-							<p className="mt-1 text-[11px] text-white/25">点击右上角 New 按钮添加第一个配置</p>
+							<p className="mt-1 text-[11px] text-white/25">点击右上角 New Provider 按钮添加第一个配置</p>
 						</div>
 					</div>
 				) : (
@@ -604,7 +655,7 @@ export function SettingsView() {
 									provider={p}
 									index={i}
 									onEdit={() => openEdit(p)}
-									onDelete={() => deleteProvider(p.id)}
+									onDelete={() => removeProvider(p.id)}
 								/>
 							))}
 						</AnimatePresence>
@@ -612,11 +663,889 @@ export function SettingsView() {
 				)}
 			</div>
 
-			{/* 配置弹框 */}
 			<AnimatePresence>
 				{modalOpen && (
 					<ProviderModal onClose={closeModal} onSave={handleSave} initialData={editingProvider ?? undefined} />
 				)}
+			</AnimatePresence>
+		</div>
+	);
+}
+
+/* ------------------------------------------------------------------ */
+/* Section · Database                                                   */
+/* ------------------------------------------------------------------ */
+
+type DbType = 'mysql' | 'sqlserver' | 'sqlite';
+
+const DB_TYPE_META: Record<DbType, { label: string; color: string; defaultPort: string; fileBased: boolean }> = {
+	mysql: { label: 'MySQL', color: '#00758f', defaultPort: '3306', fileBased: false },
+	sqlserver: { label: 'SQL Server', color: '#cc2927', defaultPort: '1433', fileBased: false },
+	sqlite: { label: 'SQLite', color: '#0f80cc', defaultPort: '', fileBased: true },
+};
+
+const EMPTY_DB_FORM: Omit<DatabaseConfigPayload, 'id' | 'updatedAt'> = {
+	name: '',
+	dbType: 'mysql',
+	server: '',
+	port: DB_TYPE_META.mysql.defaultPort,
+	database: '',
+	username: '',
+	password: '',
+};
+
+function DatabaseModal({
+	onClose,
+	onSave,
+	initialData,
+}: {
+	onClose: () => void;
+	onSave: (c: Omit<DatabaseConfigPayload, 'id' | 'updatedAt'>) => void;
+	initialData?: Omit<DatabaseConfigPayload, 'id' | 'updatedAt'>;
+}) {
+	const [form, setForm] = useState<Omit<DatabaseConfigPayload, 'id' | 'updatedAt'>>(initialData ?? EMPTY_DB_FORM);
+	const [showPwd, setShowPwd] = useState(false);
+	const dbType = (form.dbType as DbType) in DB_TYPE_META ? (form.dbType as DbType) : 'mysql';
+	const meta = DB_TYPE_META[dbType];
+	const isEditing = !!initialData;
+
+	function set<K extends keyof typeof form>(k: K, v: (typeof form)[K]) {
+		setForm((prev) => ({ ...prev, [k]: v }));
+	}
+
+	function handleType(next: DbType) {
+		setForm((prev) => {
+			const prevMeta = DB_TYPE_META[(prev.dbType as DbType) in DB_TYPE_META ? (prev.dbType as DbType) : 'mysql'];
+			return {
+				...prev,
+				dbType: next,
+				port: prev.port === prevMeta.defaultPort ? DB_TYPE_META[next].defaultPort : prev.port,
+			};
+		});
+	}
+
+	const canSave = form.name.trim() !== '' && form.server.trim() !== '';
+
+	return (
+		<>
+			<motion.div
+				initial={{ opacity: 0 }}
+				animate={{ opacity: 1 }}
+				exit={{ opacity: 0 }}
+				className="fixed inset-0 z-50 bg-black/55 backdrop-blur-sm"
+				onClick={onClose}
+			/>
+			<motion.div
+				initial={{ opacity: 0, scale: 0.96, y: 16 }}
+				animate={{ opacity: 1, scale: 1, y: 0 }}
+				exit={{ opacity: 0, scale: 0.96, y: 16 }}
+				transition={{ type: 'spring', stiffness: 300, damping: 28 }}
+				className="pointer-events-none fixed inset-0 z-50 flex items-center justify-center"
+			>
+				<div
+					className="glass app-popover pointer-events-auto w-[min(90vw,460px)] overflow-hidden rounded-2xl shadow-2xl"
+					onClick={(e) => e.stopPropagation()}
+				>
+					<div className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-white/30 to-transparent" />
+					<div className="flex items-center justify-between border-b border-white/[0.08] px-6 py-4">
+						<div>
+							<h2 className="text-sm font-semibold card-title">{isEditing ? '编辑数据库连接' : '添加数据库连接'}</h2>
+							<p className="mt-0.5 text-[11px] text-white/35">
+								{isEditing ? '修改数据库连接配置' : '配置数据库连接信息'}
+							</p>
+						</div>
+						<button
+							type="button"
+							onClick={onClose}
+							className="glass glass-icon-button glass-control h-7 w-7 rounded-full"
+						>
+							<svg
+								viewBox="0 0 12 12"
+								className="h-3 w-3"
+								stroke="currentColor"
+								strokeWidth="1.6"
+								strokeLinecap="round"
+							>
+								<line x1="2" y1="2" x2="10" y2="10" />
+								<line x1="10" y1="2" x2="2" y2="10" />
+							</svg>
+						</button>
+					</div>
+
+					<div className="space-y-4 px-6 py-5">
+						<FormRow label="名称" required>
+							<input
+								className={fieldCls}
+								placeholder="给这个连接起个名字"
+								value={form.name}
+								onChange={(e) => set('name', e.target.value)}
+							/>
+						</FormRow>
+
+						<FormRow label="数据库类型" required>
+							<div className="flex gap-2">
+								{(Object.keys(DB_TYPE_META) as DbType[]).map((t) => (
+									<button
+										key={t}
+										type="button"
+										onClick={() => handleType(t)}
+										className={`glass glass-button glass-control flex-1 rounded-xl py-2 text-xs font-medium ${
+											dbType === t
+												? 'text-white'
+												: 'border-white/10 text-white/40 hover:border-white/20 hover:text-white/70'
+										}`}
+										style={
+											dbType === t ? { color: DB_TYPE_META[t].color, borderColor: DB_TYPE_META[t].color + '60' } : {}
+										}
+									>
+										{DB_TYPE_META[t].label}
+									</button>
+								))}
+							</div>
+						</FormRow>
+
+						<div className="flex gap-3">
+							<div className="flex-1">
+								<FormRow label={meta.fileBased ? '数据库文件路径' : 'Server'} required>
+									<input
+										className={fieldCls}
+										placeholder={meta.fileBased ? 'C:\\data\\app.db' : '127.0.0.1 或 db.example.com'}
+										value={form.server}
+										onChange={(e) => set('server', e.target.value)}
+									/>
+								</FormRow>
+							</div>
+							{!meta.fileBased && (
+								<div className="w-24 shrink-0">
+									<FormRow label="Port">
+										<input
+											className={fieldCls}
+											placeholder={meta.defaultPort}
+											value={form.port}
+											onChange={(e) => set('port', e.target.value)}
+										/>
+									</FormRow>
+								</div>
+							)}
+						</div>
+
+						{!meta.fileBased && (
+							<>
+								<FormRow label="数据库名">
+									<input
+										className={fieldCls}
+										placeholder="database"
+										value={form.database}
+										onChange={(e) => set('database', e.target.value)}
+									/>
+								</FormRow>
+
+								<FormRow label="用户名">
+									<input
+										className={fieldCls}
+										placeholder="root / sa"
+										value={form.username}
+										onChange={(e) => set('username', e.target.value)}
+									/>
+								</FormRow>
+
+								<FormRow label="密码">
+									<div className="relative">
+										<input
+											className={fieldCls + ' pr-10'}
+											type={showPwd ? 'text' : 'password'}
+											placeholder="••••••••"
+											value={form.password}
+											onChange={(e) => set('password', e.target.value)}
+										/>
+										<button
+											type="button"
+											onClick={() => setShowPwd((v) => !v)}
+											className="absolute inset-y-0 right-2.5 flex items-center text-white/30 transition-colors hover:text-white/60"
+											tabIndex={-1}
+										>
+											{showPwd ? (
+												<svg
+													viewBox="0 0 16 16"
+													className="h-4 w-4"
+													fill="none"
+													stroke="currentColor"
+													strokeWidth="1.4"
+												>
+													<path d="M1 8s2.5-5 7-5 7 5 7 5-2.5 5-7 5-7-5-7-5z" />
+													<circle cx="8" cy="8" r="2" />
+												</svg>
+											) : (
+												<svg
+													viewBox="0 0 16 16"
+													className="h-4 w-4"
+													fill="none"
+													stroke="currentColor"
+													strokeWidth="1.4"
+												>
+													<path d="M2 2l12 12M6.5 6.6A2 2 0 0 0 9.4 9.4M5 4.3C3.3 5.4 2 7 2 8s2.5 5 6 5c1.3 0 2.5-.4 3.5-1M9 3.2C8.7 3.1 8.3 3 8 3c-3.5 0-6 4-6 4" />
+												</svg>
+											)}
+										</button>
+									</div>
+								</FormRow>
+							</>
+						)}
+					</div>
+
+					<div className="flex items-center justify-end gap-2.5 border-t border-white/[0.08] px-6 py-4">
+						<button
+							type="button"
+							onClick={() => {
+								onSave(form);
+								onClose();
+							}}
+							disabled={!canSave}
+							className="glass glass-button glass-control rounded-xl px-4 py-1.5 text-sm font-medium disabled:cursor-not-allowed disabled:opacity-40"
+							style={canSave ? { color: meta.color, borderColor: meta.color + '70' } : undefined}
+						>
+							保存
+						</button>
+					</div>
+				</div>
+			</motion.div>
+		</>
+	);
+}
+
+function DatabaseRow({
+	config,
+	onEdit,
+	onDelete,
+}: {
+	config: DatabaseConfigPayload;
+	onEdit: () => void;
+	onDelete: () => void;
+}) {
+	const ref = useRef<HTMLDivElement>(null);
+	const inView = useInView(ref, { amount: 0.5 });
+	const dbType = (config.dbType as DbType) in DB_TYPE_META ? (config.dbType as DbType) : 'mysql';
+	const meta = DB_TYPE_META[dbType];
+	const location = meta.fileBased
+		? config.server
+		: `${config.server}${config.port ? ':' + config.port : ''}${config.database ? '/' + config.database : ''}`;
+	return (
+		<motion.div
+			ref={ref}
+			initial={{ scale: 0.7, opacity: 0 }}
+			animate={inView ? { scale: 1, opacity: 1 } : { scale: 0.7, opacity: 0 }}
+			exit={{ opacity: 0, x: -16 }}
+			transition={{ duration: 0.2, delay: 0.1 }}
+			className="glass app-card app-card-control glass-control flex items-center gap-4 rounded-2xl px-4 py-3.5"
+		>
+			<div className="h-9 w-1 shrink-0 rounded-full" style={{ backgroundColor: meta.color }} />
+			<div className="min-w-0 flex-1">
+				<div className="flex items-center gap-2">
+					<span className="truncate text-sm font-semibold card-title">{config.name}</span>
+					<span className="glass glass-chip shrink-0 px-2 py-0.5 text-[10px] font-medium" style={{ color: meta.color }}>
+						{meta.label}
+					</span>
+				</div>
+				<div className="mt-0.5 flex items-center gap-3">
+					{!meta.fileBased && config.username && (
+						<>
+							<span className="truncate text-[11px] text-white/45">{config.username}</span>
+							<span className="shrink-0 text-white/20">·</span>
+						</>
+					)}
+					<span className="truncate text-[11px] text-white/30">{location}</span>
+				</div>
+			</div>
+			<div className="flex shrink-0 items-center gap-1">
+				<button
+					type="button"
+					onClick={onEdit}
+					className="glass glass-icon-button glass-control h-7 w-7 rounded-full text-white/25"
+					title="编辑"
+				>
+					<svg
+						viewBox="0 0 14 14"
+						className="h-3.5 w-3.5"
+						fill="none"
+						stroke="currentColor"
+						strokeWidth="1.5"
+						strokeLinecap="round"
+						strokeLinejoin="round"
+					>
+						<path d="M9.5 2.5 L11.5 4.5 L5 11 L2.5 11.5 L3 9 Z" />
+						<line x1="8" y1="4" x2="10" y2="6" />
+					</svg>
+				</button>
+				<button
+					type="button"
+					onClick={onDelete}
+					className="glass glass-icon-button glass-control h-7 w-7 rounded-full text-white/25 hover:!bg-rose-500/15 hover:text-rose-400"
+					title="删除"
+				>
+					<svg
+						viewBox="0 0 14 14"
+						className="h-3.5 w-3.5"
+						fill="none"
+						stroke="currentColor"
+						strokeWidth="1.5"
+						strokeLinecap="round"
+					>
+						<path d="M2 3.5h10M5 3.5V2.5h4v1M5.5 6v4M8.5 6v4M3 3.5l.7 8h6.6l.7-8" />
+					</svg>
+				</button>
+			</div>
+		</motion.div>
+	);
+}
+
+function DatabaseSection() {
+	const [configs, setConfigs] = useState<DatabaseConfigPayload[]>([]);
+	const [editing, setEditing] = useState<DatabaseConfigPayload | null>(null);
+	const [modalOpen, setModalOpen] = useState(false);
+
+	useEffect(() => {
+		if (!hasTauri()) return;
+		listDatabaseConfigs()
+			.then(setConfigs)
+			.catch(() => {});
+	}, []);
+
+	function openNew() {
+		setEditing(null);
+		setModalOpen(true);
+	}
+	function openEdit(c: DatabaseConfigPayload) {
+		setEditing(c);
+		setModalOpen(true);
+	}
+
+	async function handleSave(data: Omit<DatabaseConfigPayload, 'id' | 'updatedAt'>) {
+		const payload: DatabaseConfigPayload = editing
+			? { ...editing, ...data }
+			: { ...data, id: Math.random().toString(36).slice(2) };
+		// 乐观更新
+		setConfigs((prev) => {
+			const idx = prev.findIndex((c) => c.id === payload.id);
+			return idx >= 0 ? prev.map((c, i) => (i === idx ? payload : c)) : [...prev, payload];
+		});
+		if (hasTauri()) {
+			await upsertDatabaseConfig(payload)
+				.then(setConfigs)
+				.catch(() => {});
+		}
+	}
+
+	async function handleDelete(id: string) {
+		setConfigs((prev) => prev.filter((c) => c.id !== id));
+		if (hasTauri()) {
+			await deleteDatabaseConfig(id)
+				.then(setConfigs)
+				.catch(() => {});
+		}
+	}
+
+	return (
+		<div className="flex min-h-0 flex-1 flex-col gap-3">
+			<div className="flex shrink-0 items-center justify-between">
+				<h2 className="text-sm font-semibold tracking-tight card-title">管理数据库连接配置</h2>
+				<motion.button
+					type="button"
+					whileHover={{ scale: 1.04 }}
+					whileTap={{ scale: 0.96 }}
+					onClick={openNew}
+					className="glass glass-button glass-control rounded-xl px-3.5 py-1.5 text-sm font-medium"
+				>
+					<svg viewBox="0 0 12 12" className="h-3 w-3" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
+						<line x1="6" y1="1" x2="6" y2="11" />
+						<line x1="1" y1="6" x2="11" y2="6" />
+					</svg>
+					New Database
+				</motion.button>
+			</div>
+
+			<div className="min-h-0 flex-1 overflow-y-auto">
+				{configs.length === 0 ? (
+					<div className="flex h-full flex-col items-center justify-center gap-3 text-center">
+						<div className="glass glass-control flex h-14 w-14 items-center justify-center rounded-2xl">
+							<svg
+								viewBox="0 0 24 24"
+								className="h-6 w-6 text-white/25"
+								fill="none"
+								stroke="currentColor"
+								strokeWidth="1.4"
+								strokeLinecap="round"
+							>
+								<ellipse cx="12" cy="5" rx="8" ry="3" />
+								<path d="M4 5v6c0 1.7 3.6 3 8 3s8-1.3 8-3V5" />
+								<path d="M4 11v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6" />
+							</svg>
+						</div>
+						<div>
+							<p className="text-sm font-medium text-white/50">暂无数据库连接</p>
+							<p className="mt-1 text-[11px] text-white/25">点击右上角 New Database 按钮添加第一个连接</p>
+						</div>
+					</div>
+				) : (
+					<div className="space-y-2 pb-2 pr-1">
+						<AnimatePresence initial={false}>
+							{configs.map((c) => (
+								<DatabaseRow key={c.id} config={c} onEdit={() => openEdit(c)} onDelete={() => handleDelete(c.id)} />
+							))}
+						</AnimatePresence>
+					</div>
+				)}
+			</div>
+
+			<AnimatePresence>
+				{modalOpen && (
+					<DatabaseModal
+						onClose={() => {
+							setModalOpen(false);
+							setEditing(null);
+						}}
+						onSave={handleSave}
+						initialData={
+							editing
+								? {
+										name: editing.name,
+										dbType: editing.dbType,
+										server: editing.server,
+										port: editing.port,
+										database: editing.database,
+										username: editing.username,
+										password: editing.password,
+									}
+								: undefined
+						}
+					/>
+				)}
+			</AnimatePresence>
+		</div>
+	);
+}
+
+/* ------------------------------------------------------------------ */
+/* Section · API Interfaces                                             */
+/* ------------------------------------------------------------------ */
+
+const METHOD_META: Record<string, string> = {
+	GET: '#34d399',
+	POST: '#60a5fa',
+	PUT: '#fbbf24',
+	PATCH: '#a78bfa',
+	DELETE: '#f87171',
+	OPTIONS: '#94a3b8',
+	HEAD: '#94a3b8',
+	TRACE: '#94a3b8',
+};
+
+/** 绑定 Model Provider 列表的下拉框（按 id 匹配，点击展开，显示名称 + 模型 + 类型色标）。 */
+function ProviderSelect({
+	providers,
+	value,
+	onChange,
+}: {
+	providers: ModelProvider[];
+	value: string;
+	onChange: (id: string) => void;
+}) {
+	const [open, setOpen] = useState(false);
+	const wrapRef = useRef<HTMLDivElement>(null);
+
+	useEffect(() => {
+		if (!open) return;
+		function onDocClick(e: MouseEvent) {
+			if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) setOpen(false);
+		}
+		document.addEventListener('mousedown', onDocClick);
+		return () => document.removeEventListener('mousedown', onDocClick);
+	}, [open]);
+
+	const selected = providers.find((p) => p.id === value) ?? null;
+	const selectedMeta = selected ? PROVIDER_META[selected.provider] : null;
+
+	return (
+		<div ref={wrapRef} className="relative w-full">
+			<button
+				type="button"
+				onClick={() => setOpen((v) => !v)}
+				className="glass app-card-surface app-card-control glass-control flex w-full items-center gap-2.5 rounded-xl px-3 py-2.5 text-left"
+			>
+				{selectedMeta && (
+					<span className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: selectedMeta.color }} />
+				)}
+				<span className="min-w-0 flex-1 truncate text-sm text-white/80">
+					{selected ? selected.name : '选择 Model Provider'}
+				</span>
+				{selected && <span className="shrink-0 text-[11px] text-white/35">{selected.model}</span>}
+				<svg
+					viewBox="0 0 12 12"
+					className={`h-3 w-3 shrink-0 text-white/40 transition-transform ${open ? 'rotate-180' : ''}`}
+					fill="none"
+					stroke="currentColor"
+					strokeWidth="2"
+					strokeLinecap="round"
+					strokeLinejoin="round"
+				>
+					<path d="M2 4l4 4 4-4" />
+				</svg>
+			</button>
+
+			<AnimatePresence>
+				{open && (
+					<motion.div
+						initial={{ opacity: 0, scale: 0.98, y: -4 }}
+						animate={{ opacity: 1, scale: 1, y: 0 }}
+						exit={{ opacity: 0, scale: 0.98, y: -4 }}
+						transition={{ duration: 0.14, ease: [0.16, 1, 0.3, 1] }}
+						className="glass app-popover absolute left-0 right-0 top-full z-[60] mt-1.5 max-h-56 overflow-y-auto rounded-xl p-1 shadow-2xl"
+					>
+						{providers.map((p) => {
+							const meta = PROVIDER_META[p.provider];
+							const isSel = p.id === value;
+							return (
+								<button
+									key={p.id}
+									type="button"
+									onClick={() => {
+										onChange(p.id);
+										setOpen(false);
+									}}
+									className={`glass-control flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left ${
+										isSel ? 'bg-white/[0.08]' : 'hover:bg-white/[0.05]'
+									}`}
+								>
+									<span className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: meta.color }} />
+									<span className="min-w-0 flex-1 truncate text-sm text-white/80">{p.name}</span>
+									<span
+										className="glass glass-chip shrink-0 px-1.5 py-0.5 text-[9px] font-medium"
+										style={{ color: meta.color }}
+									>
+										{meta.label}
+									</span>
+									<span className="shrink-0 text-[10px] text-white/30">{p.model}</span>
+								</button>
+							);
+						})}
+					</motion.div>
+				)}
+			</AnimatePresence>
+		</div>
+	);
+}
+
+function ApiUploadModal({ onClose, onParsed }: { onClose: () => void; onParsed: (doc: ApiDocumentPayload) => void }) {
+	const { providers } = useModelProviders();
+	const [name, setName] = useState('');
+	const [fileName, setFileName] = useState('');
+	const [content, setContent] = useState('');
+	const [providerId, setProviderId] = useState(providers[0]?.id ?? '');
+	const [busy, setBusy] = useState(false);
+	const [error, setError] = useState('');
+	const fileInputRef = useRef<HTMLInputElement>(null);
+
+	async function handleFile(file: File) {
+		setError('');
+		const text = await file.text();
+		setContent(text);
+		setFileName(file.name);
+		if (!name.trim()) setName(file.name.replace(/\.(json|ya?ml)$/i, ''));
+	}
+
+	async function handleParse() {
+		if (!content.trim()) {
+			setError('请先选择 API 文档文件');
+			return;
+		}
+		setBusy(true);
+		setError('');
+		try {
+			const doc = await parseApiDocument({
+				name: name.trim(),
+				sourceFileName: fileName,
+				content,
+				modelProviderId: providerId,
+			});
+			onParsed(doc);
+			onClose();
+		} catch (e) {
+			setError(String(e));
+		} finally {
+			setBusy(false);
+		}
+	}
+
+	return (
+		<>
+			<motion.div
+				initial={{ opacity: 0 }}
+				animate={{ opacity: 1 }}
+				exit={{ opacity: 0 }}
+				className="fixed inset-0 z-50 bg-black/55 backdrop-blur-sm"
+				onClick={onClose}
+			/>
+			<motion.div
+				initial={{ opacity: 0, scale: 0.96, y: 16 }}
+				animate={{ opacity: 1, scale: 1, y: 0 }}
+				exit={{ opacity: 0, scale: 0.96, y: 16 }}
+				transition={{ type: 'spring', stiffness: 300, damping: 28 }}
+				className="pointer-events-none fixed inset-0 z-50 flex items-center justify-center"
+			>
+				<div
+					className="glass app-popover pointer-events-auto w-[min(90vw,480px)] overflow-hidden rounded-2xl shadow-2xl"
+					onClick={(e) => e.stopPropagation()}
+				>
+					<div className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-white/30 to-transparent" />
+					<div className="flex items-center justify-between border-b border-white/[0.08] px-6 py-4">
+						<div>
+							<h2 className="text-sm font-semibold card-title">上传 API 文档</h2>
+							<p className="mt-0.5 text-[11px] text-white/35">解析 OpenAPI / Swagger JSON 生成接口列表</p>
+						</div>
+						<button
+							type="button"
+							onClick={onClose}
+							className="glass glass-icon-button glass-control h-7 w-7 rounded-full"
+						>
+							<svg
+								viewBox="0 0 12 12"
+								className="h-3 w-3"
+								stroke="currentColor"
+								strokeWidth="1.6"
+								strokeLinecap="round"
+							>
+								<line x1="2" y1="2" x2="10" y2="10" />
+								<line x1="10" y1="2" x2="2" y2="10" />
+							</svg>
+						</button>
+					</div>
+
+					<div className="space-y-4 px-6 py-5">
+						<FormRow label="文档文件（.json）" required>
+							<input
+								ref={fileInputRef}
+								type="file"
+								accept=".json,application/json"
+								className="hidden"
+								onChange={(e) => {
+									const f = e.target.files?.[0];
+									if (f) void handleFile(f);
+								}}
+							/>
+							<button
+								type="button"
+								onClick={() => fileInputRef.current?.click()}
+								className="glass app-card-surface app-card-control glass-control flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left"
+							>
+								<svg
+									viewBox="0 0 24 24"
+									className="h-4 w-4 text-white/40"
+									fill="none"
+									stroke="currentColor"
+									strokeWidth="1.5"
+									strokeLinecap="round"
+								>
+									<path d="M12 16V4M8 8l4-4 4 4" />
+									<path d="M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2" />
+								</svg>
+								<span className="truncate text-sm text-white/70">{fileName || '选择 OpenAPI / Swagger JSON 文件'}</span>
+							</button>
+						</FormRow>
+
+						<FormRow label="文档名称">
+							<input
+								className={fieldCls}
+								placeholder="给这份文档起个名字"
+								value={name}
+								onChange={(e) => setName(e.target.value)}
+							/>
+						</FormRow>
+
+						<FormRow label="关联 Model Provider">
+							{providers.length === 0 ? (
+								<p className="text-[11px] text-white/35">暂无 Model Provider，可先在上方标签页添加</p>
+							) : (
+								<ProviderSelect providers={providers} value={providerId} onChange={setProviderId} />
+							)}
+						</FormRow>
+
+						{error && (
+							<div className="glass app-card-surface rounded-xl px-3 py-2 text-[11px] text-rose-300">{error}</div>
+						)}
+					</div>
+
+					<div className="flex items-center justify-end gap-2.5 border-t border-white/[0.08] px-6 py-4">
+						<button
+							type="button"
+							onClick={handleParse}
+							disabled={busy || !content.trim()}
+							className="app-button-primary px-4 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-40"
+						>
+							{busy ? '解析中…' : '解析并导入'}
+						</button>
+					</div>
+				</div>
+			</motion.div>
+		</>
+	);
+}
+
+function ApiEndpointRow({ endpoint }: { endpoint: ApiDocumentPayload['endpoints'][number] }) {
+	const color = METHOD_META[endpoint.method] ?? '#94a3b8';
+	return (
+		<div className="glass app-card-surface app-card-control glass-control flex items-center gap-3 rounded-xl px-3 py-2">
+			<span className="glass glass-chip w-14 shrink-0 text-center text-[10px] font-bold" style={{ color }}>
+				{endpoint.method}
+			</span>
+			<span className="shrink-0 font-mono text-[11px] text-white/70">{endpoint.path}</span>
+			{endpoint.summary && (
+				<>
+					<span className="shrink-0 text-white/20">·</span>
+					<span className="truncate text-[11px] text-white/45">{endpoint.summary}</span>
+				</>
+			)}
+			{endpoint.tags && <span className="ml-auto shrink-0 text-[10px] text-white/30">{endpoint.tags}</span>}
+		</div>
+	);
+}
+
+function ApiDocumentCard({ doc, onDelete }: { doc: ApiDocumentPayload; onDelete: () => void }) {
+	const [expanded, setExpanded] = useState(true);
+	return (
+		<div className="glass app-card flex flex-col gap-2 rounded-2xl px-4 py-3.5">
+			<div className="flex items-center gap-3">
+				<div className="h-8 w-1 shrink-0 rounded-full" style={{ backgroundColor: 'rgb(var(--accent-rgb))' }} />
+				<button
+					type="button"
+					onClick={() => setExpanded((v) => !v)}
+					className="flex min-w-0 flex-1 items-center gap-2 text-left"
+				>
+					<span className="truncate text-sm font-semibold card-title">{doc.name}</span>
+					<span className="glass glass-chip shrink-0 px-2 py-0.5 text-[10px] font-medium uppercase text-white/50">
+						{doc.format}
+					</span>
+					{doc.version && <span className="shrink-0 text-[10px] text-white/30">v{doc.version}</span>}
+					<span className="glass glass-chip shrink-0 px-2 py-0.5 text-[10px] font-medium text-white/50">
+						{doc.endpointCount} 接口
+					</span>
+					<svg
+						viewBox="0 0 12 12"
+						className={`ml-1 h-3 w-3 shrink-0 text-white/40 transition-transform ${expanded ? 'rotate-180' : ''}`}
+						fill="none"
+						stroke="currentColor"
+						strokeWidth="2"
+						strokeLinecap="round"
+					>
+						<path d="M2 4l4 4 4-4" />
+					</svg>
+				</button>
+				<button
+					type="button"
+					onClick={onDelete}
+					className="glass glass-icon-button glass-control h-7 w-7 shrink-0 rounded-full text-white/25 hover:!bg-rose-500/15 hover:text-rose-400"
+					title="删除"
+				>
+					<svg
+						viewBox="0 0 14 14"
+						className="h-3.5 w-3.5"
+						fill="none"
+						stroke="currentColor"
+						strokeWidth="1.5"
+						strokeLinecap="round"
+					>
+						<path d="M2 3.5h10M5 3.5V2.5h4v1M5.5 6v4M8.5 6v4M3 3.5l.7 8h6.6l.7-8" />
+					</svg>
+				</button>
+			</div>
+			{expanded && (
+				<div className="space-y-1.5 pl-4">
+					{doc.endpoints.map((ep) => (
+						<ApiEndpointRow key={ep.id} endpoint={ep} />
+					))}
+				</div>
+			)}
+		</div>
+	);
+}
+
+function ApiInterfacesSection() {
+	const [docs, setDocs] = useState<ApiDocumentPayload[]>([]);
+	const [modalOpen, setModalOpen] = useState(false);
+
+	useEffect(() => {
+		if (!hasTauri()) return;
+		listApiDocuments()
+			.then(setDocs)
+			.catch(() => {});
+	}, []);
+
+	function handleParsed(doc: ApiDocumentPayload) {
+		setDocs((prev) => {
+			const idx = prev.findIndex((d) => d.id === doc.id);
+			return idx >= 0 ? prev.map((d, i) => (i === idx ? doc : d)) : [doc, ...prev];
+		});
+	}
+
+	async function handleDelete(id: string) {
+		setDocs((prev) => prev.filter((d) => d.id !== id));
+		if (hasTauri()) {
+			await deleteApiDocument(id)
+				.then(setDocs)
+				.catch(() => {});
+		}
+	}
+
+	return (
+		<div className="flex min-h-0 flex-1 flex-col gap-3">
+			<div className="flex shrink-0 items-center justify-between">
+				<h2 className="text-sm font-semibold tracking-tight card-title">上传 API 文档并生成接口列表</h2>
+				<motion.button
+					type="button"
+					whileHover={{ scale: 1.04 }}
+					whileTap={{ scale: 0.96 }}
+					onClick={() => setModalOpen(true)}
+					className="glass glass-button glass-control rounded-xl px-3.5 py-1.5 text-sm font-medium"
+				>
+					<svg viewBox="0 0 12 12" className="h-3 w-3" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
+						<line x1="6" y1="1" x2="6" y2="11" />
+						<line x1="1" y1="6" x2="11" y2="6" />
+					</svg>
+					Upload API Doc
+				</motion.button>
+			</div>
+
+			<div className="min-h-0 flex-1 overflow-y-auto">
+				{docs.length === 0 ? (
+					<div className="flex h-full flex-col items-center justify-center gap-3 text-center">
+						<div className="glass glass-control flex h-14 w-14 items-center justify-center rounded-2xl">
+							<svg
+								viewBox="0 0 24 24"
+								className="h-6 w-6 text-white/25"
+								fill="none"
+								stroke="currentColor"
+								strokeWidth="1.4"
+								strokeLinecap="round"
+							>
+								<path d="M14 3v5h5" />
+								<path d="M5 3h9l5 5v11a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1z" />
+								<path d="M8 13h8M8 17h6" />
+							</svg>
+						</div>
+						<div>
+							<p className="text-sm font-medium text-white/50">暂无 API 文档</p>
+							<p className="mt-1 text-[11px] text-white/25">点击右上角 Upload API Doc 上传 OpenAPI / Swagger JSON</p>
+						</div>
+					</div>
+				) : (
+					<div className="space-y-2 pb-2 pr-1">
+						{docs.map((d) => (
+							<ApiDocumentCard key={d.id} doc={d} onDelete={() => handleDelete(d.id)} />
+						))}
+					</div>
+				)}
+			</div>
+
+			<AnimatePresence>
+				{modalOpen && <ApiUploadModal onClose={() => setModalOpen(false)} onParsed={handleParsed} />}
 			</AnimatePresence>
 		</div>
 	);
@@ -970,9 +1899,7 @@ export function AssistantView() {
 				accumulated += decoder.decode(value, { stream: true });
 				const tokenCount = estimateTokens(accumulated);
 				setMessages((prev) =>
-					prev.map((m) =>
-						m.id === assistantId ? { ...m, content: accumulated, tokens: tokenCount } : m,
-					),
+					prev.map((m) => (m.id === assistantId ? { ...m, content: accumulated, tokens: tokenCount } : m)),
 				);
 			}
 		} catch (err) {
@@ -1152,7 +2079,7 @@ export function AssistantView() {
 
 					<input
 						className="flex-1 bg-transparent text-sm text-white placeholder:text-white/30 focus:outline-none"
-					placeholder="向知识库 AI 提问…"
+						placeholder="向知识库 AI 提问…"
 						onChange={(e) => setInput(e.target.value)}
 						onKeyDown={handleKey}
 					/>

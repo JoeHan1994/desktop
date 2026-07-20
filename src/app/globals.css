@@ -102,6 +102,33 @@ body {
 	.text-white\/85 {
 		color: rgb(var(--foreground) / 0.95) !important;
 	}
+	.text-white\/90 {
+		color: rgb(var(--foreground) / 0.98) !important;
+	}
+	.text-white\/95 {
+		color: rgb(var(--foreground) / 0.99) !important;
+	}
+	.hover\:text-white\/60:hover {
+		color: rgb(var(--foreground) / 0.82) !important;
+	}
+	.hover\:text-white\/65:hover {
+		color: rgb(var(--foreground) / 0.84) !important;
+	}
+	.hover\:text-white\/70:hover {
+		color: rgb(var(--foreground) / 0.86) !important;
+	}
+	.hover\:text-white\/75:hover {
+		color: rgb(var(--foreground) / 0.9) !important;
+	}
+	.hover\:text-white\/80:hover {
+		color: rgb(var(--foreground) / 0.92) !important;
+	}
+	.hover\:text-white\/85:hover {
+		color: rgb(var(--foreground) / 0.95) !important;
+	}
+	.hover\:text-white\/90:hover {
+		color: rgb(var(--foreground) / 0.98) !important;
+	}
 	.placeholder\:text-white\/20::placeholder {
 		color: rgb(var(--foreground) / 0.34) !important;
 	}
@@ -301,6 +328,68 @@ body {
 		color: rgb(var(--foreground) / 0.7);
 	}
 
+	/* 模态遮罩：居中内容 + 暗化背景 + 轻微毛玻璃，统一所有弹窗/对话框层。
+     默认 z-index 50，需要更高层级时叠加 Tailwind 的 z-[...] 工具类即可覆盖。 */
+	.app-modal-overlay {
+		position: fixed;
+		inset: 0;
+		z-index: 50;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		padding: 1rem;
+		background-color: rgb(0 0 0 / 0.55);
+		-webkit-backdrop-filter: blur(4px);
+		backdrop-filter: blur(4px);
+	}
+
+	/* 表单字段标签：卡片 / 弹窗内输入项上方的次要说明文字。
+     替代散落的 text-[11px] text-white/45，随主题（含浅色）自动反色。 */
+	.field-label {
+		display: block;
+		font-size: 11px;
+		line-height: 1.4;
+		color: rgb(var(--foreground) / 0.7);
+	}
+
+	/* 元信息小标题：大写 + 字距，用于区块内的次级分类标识（如 原文 / ID / Metadata）。
+     替代 text-[10px] uppercase tracking-wider text-white/30 一类的重复写法。 */
+	.meta-label {
+		font-size: 10px;
+		font-weight: 500;
+		letter-spacing: 0.14em;
+		text-transform: uppercase;
+		color: rgb(var(--foreground) / 0.55);
+		line-height: 1.3;
+	}
+
+	/* 主操作按钮：强调色实心，用于页面 / 表单的主要提交动作（导入、保存、确认等）。 */
+	.app-button-primary {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		gap: 0.5rem;
+		border-radius: 0.75rem;
+		background-color: rgb(var(--accent-rgb));
+		color: #fff;
+		font-weight: 500;
+		box-shadow: 0 10px 24px -8px rgb(var(--accent-rgb) / calc(0.5 * var(--shadow-strength)));
+		transition:
+			filter 180ms ease,
+			box-shadow 180ms ease,
+			opacity 180ms ease;
+	}
+
+	.app-button-primary:hover {
+		filter: brightness(1.1);
+	}
+
+	.app-button-primary:disabled {
+		opacity: 0.4;
+		box-shadow: none;
+		cursor: not-allowed;
+	}
+
 	/**
    * 全局卡片标签样式（section / field label）
    * 用于卡片内的区域名称、阶段标签、副标题等次要但重要的标识文字。
@@ -316,17 +405,11 @@ body {
 	}
 
 	/**
-   * 全局卡片标题样式：动态渐变文字
-   * 使用 background-clip: text 实现渐变，动画平滑循环移位。
-   * 只应用于卡片 / 面板的主标题，size 保持原有设定。
+   * 全局卡片标题样式：纯色文字
+   * size / font-weight 由各元素自身的工具类决定，这里只统一颜色。
    */
 	.card-title {
-		background-image: linear-gradient(to right, #5227ff, #ff9ffc, #b497cf, #5227ff);
-		background-size: 300% 100%;
-		-webkit-background-clip: text;
-		background-clip: text;
-		color: transparent;
-		animation: card-title-gradient 16s ease-in-out infinite;
+		color: rgb(255 255 255 / 0.8);
 	}
 
 	.glass-track {
@@ -386,19 +469,6 @@ body {
 	}
 	50% {
 		opacity: 0.9;
-	}
-}
-
-/* 卡片标题渐变动画：yoyo 平滑小摩 */
-@keyframes card-title-gradient {
-	0% {
-		background-position: 0% 50%;
-	}
-	50% {
-		background-position: 100% 50%;
-	}
-	100% {
-		background-position: 0% 50%;
 	}
 }
 

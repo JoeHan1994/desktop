@@ -513,6 +513,90 @@ export async function deleteProvider(id: string): Promise<void> {
 	return invoke('delete_provider', { id });
 }
 
+// ── Settings: Database Configs ─────────────────────────────────────────────
+
+/** 与 Rust `domain::database_config::DatabaseConfig` 结构一致。 */
+export interface DatabaseConfigPayload {
+	id: string;
+	name: string;
+	/** 'mysql' | 'sqlserver' | 'sqlite' */
+	dbType: string;
+	server: string;
+	port: string;
+	database: string;
+	username: string;
+	password: string;
+	updatedAt?: string;
+}
+
+/** 从 MySQL 加载所有已保存的数据库连接配置。 */
+export async function listDatabaseConfigs(): Promise<DatabaseConfigPayload[]> {
+	return invoke<DatabaseConfigPayload[]>('list_database_configs');
+}
+
+/** 新增或更新一个数据库连接配置，返回最新列表。 */
+export async function upsertDatabaseConfig(config: DatabaseConfigPayload): Promise<DatabaseConfigPayload[]> {
+	return invoke<DatabaseConfigPayload[]>('upsert_database_config', { config });
+}
+
+/** 按 id 删除一个数据库连接配置，返回最新列表。 */
+export async function deleteDatabaseConfig(id: string): Promise<DatabaseConfigPayload[]> {
+	return invoke<DatabaseConfigPayload[]>('delete_database_config', { id });
+}
+
+// ── Settings: API Interface Documents ──────────────────────────────────────
+
+/** 与 Rust `domain::api_interface::ApiEndpoint` 结构一致。 */
+export interface ApiEndpointPayload {
+	id: string;
+	documentId: string;
+	method: string;
+	path: string;
+	summary: string;
+	operationId: string;
+	tags: string;
+	requestSchemaJson: string;
+	responseSchemaJson: string;
+}
+
+/** 与 Rust `domain::api_interface::ApiDocumentWithEndpoints` 结构一致（扁平化）。 */
+export interface ApiDocumentPayload {
+	id: string;
+	name: string;
+	sourceFileName: string;
+	format: string;
+	title: string;
+	version: string;
+	modelProviderId: string;
+	endpointCount: number;
+	createdAt: string;
+	updatedAt: string;
+	endpoints: ApiEndpointPayload[];
+}
+
+/** 解析 API 文档时的入参。 */
+export interface ParseApiDocumentParams {
+	name: string;
+	sourceFileName: string;
+	content: string;
+	modelProviderId: string;
+}
+
+/** 从 MySQL 加载所有已保存的 API 文档及其接口列表。 */
+export async function listApiDocuments(): Promise<ApiDocumentPayload[]> {
+	return invoke<ApiDocumentPayload[]>('list_api_documents_with_endpoints');
+}
+
+/** 解析上传的 OpenAPI/Swagger JSON 文档并持久化，返回该文档及接口列表。 */
+export async function parseApiDocument(params: ParseApiDocumentParams): Promise<ApiDocumentPayload> {
+	return invoke<ApiDocumentPayload>('parse_api_document', { request: params });
+}
+
+/** 按 id 删除一个 API 文档及其全部接口，返回最新列表。 */
+export async function deleteApiDocument(id: string): Promise<ApiDocumentPayload[]> {
+	return invoke<ApiDocumentPayload[]>('delete_api_document', { id });
+}
+
 // ── 通用键值设置 ──────────────────────────────────────────────────────────
 
 /** 读取一个持久化设置项（不存在时返回 null）。 */
@@ -523,4 +607,46 @@ export async function getSetting(key: string): Promise<string | null> {
 /** 写入（或覆盖）一个持久化设置项。 */
 export async function setSetting(key: string, value: string): Promise<void> {
 	return invoke('set_setting', { key, value });
+}
+
+/** 运行本机 `az account show --output json`，返回原始 JSON 字符串。
+ *  若未安装 az 或未登录则 reject。 */
+export async function runAzAccountShow(): Promise<string> {
+	return invoke<string>('run_az_account_show');
+}
+
+export interface CreateWorkItemParams {
+	baseUrl: string;
+	accessKey: string;
+	title: string;
+	description: string;
+	priority: string;
+	area?: string;
+	iteration?: string;
+	source?: string;
+	issueType?: string;
+	sprintTeam?: string;
+}
+
+export interface CreateWorkItemResult {
+	id: number;
+	url: string;
+}
+
+/** 在 Rust 侧执行 Terraforge GetToken → CreateWorkItem，绕过 WebView CORS。 */
+export async function createWorkItem(params: CreateWorkItemParams): Promise<CreateWorkItemResult> {
+	return invoke<CreateWorkItemResult>('create_work_item', {
+		params: {
+			base_url: params.baseUrl,
+			access_key: params.accessKey,
+			title: params.title,
+			description: params.description,
+			priority: params.priority,
+			area: params.area ?? null,
+			iteration: params.iteration ?? null,
+			source: params.source ?? null,
+			issue_type: params.issueType ?? null,
+			sprint_team: params.sprintTeam ?? null,
+		},
+	});
 }

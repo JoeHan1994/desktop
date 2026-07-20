@@ -305,6 +305,81 @@ pub fn ensure_model_provider_schema(pool: &Pool) -> Result<()> {
     Ok(())
 }
 
+/// Ensure the `database_configs` table exists with all required columns.
+pub fn ensure_database_config_schema(pool: &Pool) -> Result<()> {
+    let mut conn = pool.get_conn().map_err(AppError::MySql)?;
+    conn.query_drop(
+        r#"
+        CREATE TABLE IF NOT EXISTS database_configs (
+            id                  VARCHAR(191) NOT NULL,
+            name                VARCHAR(255) NOT NULL,
+            db_type             VARCHAR(32) NOT NULL,
+            server              VARCHAR(512) NOT NULL DEFAULT '',
+            port                VARCHAR(16) NOT NULL DEFAULT '',
+            database_name       VARCHAR(255) NOT NULL DEFAULT '',
+            username            VARCHAR(255) NOT NULL DEFAULT '',
+            password_ciphertext TEXT NULL,
+            password_nonce      VARCHAR(64) NULL,
+            created_at          DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+            updated_at          DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3)
+                                  ON UPDATE CURRENT_TIMESTAMP(3),
+            PRIMARY KEY (id),
+            KEY idx_database_configs_db_type (db_type),
+            KEY idx_database_configs_updated_at (updated_at)
+        ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_unicode_ci
+        "#,
+    )
+    .map_err(|e| AppError::Other(format!("初始化 MySQL 数据库配置表失败：{e}")))?;
+    Ok(())
+}
+
+/// Ensure the `api_documents` and `api_endpoints` tables exist.
+pub fn ensure_api_interface_schema(pool: &Pool) -> Result<()> {
+    let mut conn = pool.get_conn().map_err(AppError::MySql)?;
+    conn.query_drop(
+        r#"
+        CREATE TABLE IF NOT EXISTS api_documents (
+            id                VARCHAR(191) NOT NULL,
+            name              VARCHAR(255) NOT NULL,
+            source_file_name  VARCHAR(512) NOT NULL DEFAULT '',
+            format            VARCHAR(32) NOT NULL DEFAULT 'openapi',
+            title             VARCHAR(512) NOT NULL DEFAULT '',
+            version           VARCHAR(64) NOT NULL DEFAULT '',
+            model_provider_id VARCHAR(191) NOT NULL DEFAULT '',
+            endpoint_count    INT UNSIGNED NOT NULL DEFAULT 0,
+            created_at        DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+            updated_at        DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3)
+                                ON UPDATE CURRENT_TIMESTAMP(3),
+            PRIMARY KEY (id),
+            KEY idx_api_documents_updated_at (updated_at)
+        ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_unicode_ci
+        "#,
+    )
+    .map_err(|e| AppError::Other(format!("初始化 MySQL API 文档表失败：{e}")))?;
+
+    conn.query_drop(
+        r#"
+        CREATE TABLE IF NOT EXISTS api_endpoints (
+            id                   VARCHAR(191) NOT NULL,
+            document_id          VARCHAR(191) NOT NULL,
+            method               VARCHAR(16) NOT NULL,
+            path                 VARCHAR(1024) NOT NULL,
+            summary              VARCHAR(1024) NOT NULL DEFAULT '',
+            operation_id         VARCHAR(512) NOT NULL DEFAULT '',
+            tags                 VARCHAR(512) NOT NULL DEFAULT '',
+            request_schema_json  MEDIUMTEXT NULL,
+            response_schema_json MEDIUMTEXT NULL,
+            sort_order           INT UNSIGNED NOT NULL DEFAULT 0,
+            PRIMARY KEY (id),
+            KEY idx_api_endpoints_document (document_id),
+            KEY idx_api_endpoints_order (document_id, sort_order)
+        ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_unicode_ci
+        "#,
+    )
+    .map_err(|e| AppError::Other(format!("初始化 MySQL API 接口表失败：{e}")))?;
+    Ok(())
+}
+
 // ── Internal utilities ────────────────────────────────────────────────────
 
 /// Add `column_name` to `table_name` using `alter_sql` if the column is absent.

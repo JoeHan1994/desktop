@@ -19,7 +19,7 @@ mod text_file; // Binary detection + text codec
 // Alias command modules to avoid name collisions with top-level `pipeline` and `remote`.
 use commands::pipeline as pipeline_cmds;
 use commands::remote as remote_cmds;
-use commands::{remote_profiles, settings, vector_db};
+use commands::{api_interfaces, database_configs, remote_profiles, settings, vector_db};
 use db::DbState;
 use domain::pipeline::AppState;
 use mysql_profiles::MySqlProfileState;
@@ -121,6 +121,16 @@ fn main() {
             settings::import_legacy_model_providers,
             settings::get_setting,
             settings::set_setting,
+            settings::run_az_account_show,
+            settings::create_work_item,
+            // Database connection configs
+            database_configs::list_database_configs,
+            database_configs::upsert_database_config,
+            database_configs::delete_database_config,
+            // API interface documents
+            api_interfaces::list_api_documents_with_endpoints,
+            api_interfaces::parse_api_document,
+            api_interfaces::delete_api_document,
             // Remote machine profiles
             remote_profiles::list_remote_machine_profiles,
             remote_profiles::upsert_remote_machine_profile,

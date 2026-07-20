@@ -9,6 +9,7 @@ import { AssistantView, RagView, SettingsView } from '@/components/views/Views';
 import { RemoteMachineView } from '@/features/remote/RemoteMachineView';
 import { VectorDbView } from '@/features/vectordb/VectorDbView';
 import { IngestionPipelineView } from '@/features/pipeline/IngestionPipelineView';
+import { getSetting, setSetting, runAzAccountShow } from '@/services/tauriBridge';
 
 const VIEWS: Record<ViewId, () => JSX.Element> = {
 	assistant: AssistantView,
@@ -78,6 +79,9 @@ function MyToolBoxLogo() {
 export function AppShell() {
 	const [active, setActive] = useState<ViewId>('remote');
 	const [themeOpen, setThemeOpen] = useState(false);
+	const [azUpn, setAzUpn] = useState<string | null>(null);
+	const [azLoading, setAzLoading] = useState(false);
+	const [azError, setAzError] = useState<string | null>(null);
 
 	/** 缓存 Tauri appWindow 实例，useEffect 挂载后异步加载 */
 	const appWin = useRef<TauriAppWindow | null>(null);
@@ -90,6 +94,36 @@ export function AppShell() {
 			})
 			.catch(() => {});
 	}, []);
+
+	// 从持久化设置中恢复上次的 Azure 账号
+	useEffect(() => {
+		if (typeof window === 'undefined' || !('__TAURI__' in window)) return;
+		getSetting('az.account.upn')
+			.then((upn) => {
+				if (upn) setAzUpn(upn);
+			})
+			.catch(() => {});
+	}, []);
+
+	async function handleAzLogin() {
+		if (azLoading) return;
+		setAzLoading(true);
+		setAzError(null);
+		try {
+			const json = await runAzAccountShow();
+			const account = JSON.parse(json) as { user?: { name?: string } };
+			const upn = account?.user?.name ?? null;
+			setAzUpn(upn);
+			setAzError(upn ? null : '未检测到登录账号');
+			if (upn) void setSetting('az.account.upn', upn);
+		} catch (err) {
+			setAzUpn(null);
+			setAzError(err instanceof Error ? err.message : String(err));
+			void setSetting('az.account.upn', '');
+		} finally {
+			setAzLoading(false);
+		}
+	}
 
 	function winAction(action: 'minimize' | 'maximize' | 'close') {
 		const w = appWin.current;
@@ -149,6 +183,30 @@ export function AppShell() {
 
 				{/* 右：窗口控制按钮组 */}
 				<div className="flex shrink-0 items-center gap-1">
+					{/* AZ Login */}
+					<button
+						onClick={() => void handleAzLogin()}
+						disabled={azLoading}
+						aria-label={azUpn ? `Azure: ${azUpn}` : 'AZ Login'}
+						title={
+							azError
+								? `错误: ${azError}\n点击重试`
+								: azUpn
+									? `Azure 账号: ${azUpn}\n点击刷新`
+									: '点击检查 Azure CLI 登录状态'
+						}
+						className={`glass glass-control h-7 rounded-full px-2.5 flex items-center gap-1.5 text-[10px] font-medium transition-colors disabled:opacity-50 ${
+							azError ? 'text-rose-400/80 hover:text-rose-300' : 'text-white/55 hover:text-white/85'
+						}`}
+					>
+						<svg viewBox="0 0 16 16" className="h-3 w-3 shrink-0" fill="currentColor" aria-hidden="true">
+							<path d="M8 0C3.58 0 0 3.58 0 8s3.58 8 8 8 8-3.58 8-8-3.58-8-8-8zm0 14.5c-3.58 0-6.5-2.92-6.5-6.5S4.42 1.5 8 1.5s6.5 2.92 6.5 6.5-2.92 6.5-6.5 6.5zm0-11A4.5 4.5 0 1 0 12.5 8 4.5 4.5 0 0 0 8 3.5zm0 7.5a3 3 0 1 1 3-3 3 3 0 0 1-3 3z" />
+						</svg>
+						<span className="max-w-[110px] truncate">
+							{azLoading ? '加载中…' : azError ? '登录失败' : (azUpn ?? 'AZ Login')}
+						</span>
+					</button>
+					<div className="mx-0.5 h-3.5 w-px bg-white/[0.1]" />
 					{/* 外观配置 */}
 					<button
 						onClick={() => setThemeOpen((o) => !o)}

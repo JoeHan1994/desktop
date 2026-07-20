@@ -8,7 +8,7 @@ interface WinRmTerminalPanelProps {
 	open: boolean;
 	status: WinRmTerminalStatus;
 	lines: WinRmTerminalLine[];
-	scrollRef: React.RefObject<HTMLDivElement | null>;
+	scrollRef: React.RefObject<HTMLDivElement>;
 	onToggle: () => void;
 }
 
