@@ -34,6 +34,10 @@ import {
 	upsertRemoteMachineProfile,
 	upsertHyperVVmCredentialProfile,
 	winRmRunOpenSshSetup,
+	getSetting,
+	setSetting,
+	runAzAccountShow,
+	createWorkItem,
 	type HyperVVmCredentialProfile,
 	type HyperVVirtualMachine,
 	type RemoteConnection,
@@ -86,6 +90,16 @@ interface FileContextMenuState {
 	node: TreeNode;
 	x: number;
 	y: number;
+}
+
+interface ContentContextMenuState {
+	x: number;
+	y: number;
+	selectedText: string;
+}
+
+interface BugReportModalState {
+	selectedText: string;
 }
 
 interface RemoteMachineImportResult {
@@ -1421,7 +1435,7 @@ export function RemoteMachineView() {
 	const [winRmTerminalLines, setWinRmTerminalLines] = useState<WinRmTerminalLine[]>([]);
 	const [winRmRunId, setWinRmRunId] = useState<string | null>(null);
 	const winRmRunIdRef = useRef<string | null>(null);
-	const winRmTerminalScrollRef = useRef<HTMLDivElement | null>(null);
+	const winRmTerminalScrollRef = useRef<HTMLDivElement>(null);
 	const importFileRef = useRef<HTMLInputElement | null>(null);
 	const [importingProfiles, setImportingProfiles] = useState(false);
 	const [importNotice, setImportNotice] = useState('');
@@ -1481,6 +1495,25 @@ export function RemoteMachineView() {
 	const sshTerminalInputRef = useRef<HTMLInputElement>(null);
 	const [treeContextMenu, setTreeContextMenu] = useState<FileContextMenuState | null>(null);
 	const [treeActionMsg, setTreeActionMsg] = useState('');
+
+	// 文件内容区右键菜单
+	const [contentContextMenu, setContentContextMenu] = useState<ContentContextMenuState | null>(null);
+	const [bugModal, setBugModal] = useState<BugReportModalState | null>(null);
+	const [bugNotes, setBugNotes] = useState('');
+	const [bugApiUrl, setBugApiUrl] = useState('');
+	const [bugApiKey, setBugApiKey] = useState('');
+	const [bugTitle, setBugTitle] = useState('');
+	const [bugPriority, setBugPriority] = useState<'Critical' | 'High' | 'Medium' | 'Low'>('Medium');
+	const [bugCreating, setBugCreating] = useState(false);
+	const [bugCreateError, setBugCreateError] = useState('');
+	const [bugCreateResult, setBugCreateResult] = useState<{ id: number; url: string } | null>(null);
+	const [bugCreatorUpn, setBugCreatorUpn] = useState<string | null>(null);
+	const [bugArea, setBugArea] = useState('');
+	const [bugIteration, setBugIteration] = useState('');
+	const [bugSource, setBugSource] = useState('');
+	const [bugIssueType, setBugIssueType] = useState('');
+	const [bugSprintTeam, setBugSprintTeam] = useState('');
+	const fileEditorTextareaRef = useRef<HTMLTextAreaElement>(null);
 
 	// ── 心跳 & 自动重连 ─────────────────────────────────────────────────────
 	const [connectionHealth, setConnectionHealth] = useState<Record<string, ConnectionHealth>>({});
@@ -1870,6 +1903,29 @@ export function RemoteMachineView() {
 			setDbPassword('');
 			setDbSecretKey('');
 		}
+		// 同时加载 Terraforge API 配置
+		try {
+			const keys = [
+				'terraforge.api.url',
+				'terraforge.api.key',
+				'terraforge.bug.area',
+				'terraforge.bug.iteration',
+				'terraforge.bug.source',
+				'terraforge.bug.issue_type',
+				'terraforge.bug.sprint_team',
+			];
+			const vals = await Promise.all(keys.map((k) => getSetting(k)));
+			const [sUrl, sKey, sArea, sIter, sSrc, sType, sTeam] = vals;
+			if (sUrl !== null) setBugApiUrl(sUrl ?? '');
+			if (sKey !== null) setBugApiKey(sKey ?? '');
+			if (sArea !== null) setBugArea(sArea ?? '');
+			if (sIter !== null) setBugIteration(sIter ?? '');
+			if (sSrc !== null) setBugSource(sSrc ?? '');
+			if (sType !== null) setBugIssueType(sType ?? '');
+			if (sTeam !== null) setBugSprintTeam(sTeam ?? '');
+		} catch {
+			/* ignore */
+		}
 		setDbConfigOpen(true);
 	}
 
@@ -1887,6 +1943,14 @@ export function RemoteMachineView() {
 		setDbConfigError('');
 		try {
 			await saveDbUserConfig({ username, password: dbPassword, secretKey: dbSecretKey });
+			// 同时保存 Terraforge API 配置
+			if (bugApiUrl.trim()) void setSetting('terraforge.api.url', bugApiUrl.trim());
+			if (bugApiKey.trim()) void setSetting('terraforge.api.key', bugApiKey.trim());
+			if (bugArea.trim()) void setSetting('terraforge.bug.area', bugArea.trim());
+			if (bugIteration.trim()) void setSetting('terraforge.bug.iteration', bugIteration.trim());
+			if (bugSource.trim()) void setSetting('terraforge.bug.source', bugSource.trim());
+			if (bugIssueType.trim()) void setSetting('terraforge.bug.issue_type', bugIssueType.trim());
+			if (bugSprintTeam.trim()) void setSetting('terraforge.bug.sprint_team', bugSprintTeam.trim());
 			setDbUsername(username);
 			setImportError('');
 			setImportNotice('mysql.toml 已更新，重启应用后生效');
@@ -2444,6 +2508,161 @@ export function RemoteMachineView() {
 		event.preventDefault();
 		event.stopPropagation();
 		setTreeContextMenu({ node, x: event.clientX, y: event.clientY });
+	}
+
+	// ── 文件内容区右键菜单 ────────────────────────────────────────────────
+
+	function handleContentContextMenu(e: React.MouseEvent) {
+		e.preventDefault();
+		e.stopPropagation();
+		const selectedText = window.getSelection()?.toString() ?? '';
+		setContentContextMenu({ x: e.clientX, y: e.clientY, selectedText });
+	}
+
+	useEffect(() => {
+		if (!contentContextMenu) return;
+		const closeMenu = () => setContentContextMenu(null);
+		const onMouseDown = (e: MouseEvent) => {
+			if ((e.target as HTMLElement).closest('[data-content-context-menu]')) return;
+			closeMenu();
+		};
+		window.addEventListener('mousedown', onMouseDown);
+		window.addEventListener('resize', closeMenu);
+		window.addEventListener('scroll', closeMenu, true);
+		return () => {
+			window.removeEventListener('mousedown', onMouseDown);
+			window.removeEventListener('resize', closeMenu);
+			window.removeEventListener('scroll', closeMenu, true);
+		};
+	}, [contentContextMenu]);
+
+	async function handleContentCopy() {
+		if (contentContextMenu?.selectedText) {
+			try {
+				await navigator.clipboard.writeText(contentContextMenu.selectedText);
+			} catch {
+				/* ignore */
+			}
+		}
+		setContentContextMenu(null);
+	}
+
+	async function handleContentPaste() {
+		if (!isEditing) {
+			setContentContextMenu(null);
+			return;
+		}
+		try {
+			const text = await navigator.clipboard.readText();
+			const textarea = fileEditorTextareaRef.current;
+			if (textarea && text) {
+				const start = textarea.selectionStart ?? 0;
+				const end = textarea.selectionEnd ?? 0;
+				const newVal = editorDraft.slice(0, start) + text + editorDraft.slice(end);
+				handleDraftChange(newVal);
+				requestAnimationFrame(() => {
+					textarea.selectionStart = start + text.length;
+					textarea.selectionEnd = start + text.length;
+					textarea.focus();
+				});
+			}
+		} catch {
+			/* clipboard read failed */
+		}
+		setContentContextMenu(null);
+	}
+
+	async function handleOpenBugModal() {
+		setBugNotes('');
+		setBugCreateError('');
+		setBugCreateResult(null);
+		setBugCreatorUpn(null);
+		setBugModal({ selectedText: contentContextMenu?.selectedText ?? '' });
+		setContentContextMenu(null);
+		// 异步加载已保存的 API 配置和 Azure 账号
+		try {
+			const results = await Promise.allSettled([
+				getSetting('terraforge.api.url'),
+				getSetting('terraforge.api.key'),
+				getSetting('terraforge.bug.area'),
+				getSetting('terraforge.bug.iteration'),
+				getSetting('terraforge.bug.source'),
+				getSetting('terraforge.bug.issue_type'),
+				getSetting('terraforge.bug.sprint_team'),
+				runAzAccountShow(),
+			]);
+			const [rUrl, rKey, rArea, rIter, rSrc, rType, rTeam, rAz] = results;
+			if (rUrl.status === 'fulfilled' && rUrl.value && !bugApiUrl.trim()) setBugApiUrl(rUrl.value);
+			if (rKey.status === 'fulfilled' && rKey.value && !bugApiKey.trim()) setBugApiKey(rKey.value);
+			if (rArea.status === 'fulfilled' && rArea.value !== null) setBugArea(rArea.value ?? '');
+			if (rIter.status === 'fulfilled' && rIter.value !== null) setBugIteration(rIter.value ?? '');
+			if (rSrc.status === 'fulfilled' && rSrc.value !== null) setBugSource(rSrc.value ?? '');
+			if (rType.status === 'fulfilled' && rType.value !== null) setBugIssueType(rType.value ?? '');
+			if (rTeam.status === 'fulfilled' && rTeam.value !== null) setBugSprintTeam(rTeam.value ?? '');
+			if (rAz.status === 'fulfilled' && rAz.value) {
+				const account = JSON.parse(rAz.value) as { user?: { name?: string } };
+				setBugCreatorUpn(account?.user?.name ?? null);
+			}
+		} catch {
+			/* ignore */
+		}
+	}
+
+	function buildBugDescription(modal: BugReportModalState, notes: string): string {
+		const conn = connections.find((c) => c.id === activeConnectionId);
+		const file = sftpToDisplay(selectedFile ?? '');
+		const machine = conn ? conn.label || `${conn.username}@${conn.host}` : '';
+		// Normalize line endings
+		const logText = modal.selectedText.replace(/\r\n/g, '\n').replace(/\r/g, '\n').trim() || '(no content selected)';
+
+		const lines: string[] = [];
+		if (bugCreatorUpn) lines.push(`CreateBy: ${bugCreatorUpn}`);
+		if (file) lines.push(`File: ${file}`);
+		if (machine) lines.push(`Machine: ${machine}`);
+		lines.push('');
+		lines.push('Log Message:');
+		lines.push(logText);
+		if (notes.trim()) {
+			lines.push('');
+			lines.push('Notes:');
+			lines.push(notes.trim());
+		}
+
+		return lines.join('\n');
+	}
+
+	async function handleCreateBugReport() {
+		if (!bugModal || !bugApiUrl.trim() || !bugApiKey.trim() || !bugTitle.trim()) return;
+		setBugCreating(true);
+		setBugCreateError('');
+		setBugCreateResult(null);
+		try {
+			const result = await createWorkItem({
+				baseUrl: bugApiUrl.trim(),
+				accessKey: bugApiKey.trim(),
+				title: bugTitle.trim(),
+				description: buildBugDescription(bugModal, bugNotes),
+				priority: bugPriority,
+				area: bugArea.trim() || undefined,
+				iteration: bugIteration.trim() || undefined,
+				source: bugSource.trim() || undefined,
+				issueType: bugIssueType.trim() || undefined,
+				sprintTeam: bugSprintTeam.trim() || undefined,
+			});
+			setBugCreateResult({ id: result.id, url: result.url });
+			// 成功后持久化配置
+			void setSetting('terraforge.api.url', bugApiUrl.trim());
+			void setSetting('terraforge.api.key', bugApiKey.trim());
+			if (bugArea.trim()) void setSetting('terraforge.bug.area', bugArea.trim());
+			if (bugIteration.trim()) void setSetting('terraforge.bug.iteration', bugIteration.trim());
+			if (bugSource.trim()) void setSetting('terraforge.bug.source', bugSource.trim());
+			if (bugIssueType.trim()) void setSetting('terraforge.bug.issue_type', bugIssueType.trim());
+			if (bugSprintTeam.trim()) void setSetting('terraforge.bug.sprint_team', bugSprintTeam.trim());
+		} catch (err) {
+			setBugCreateError(err instanceof Error ? err.message : String(err));
+		} finally {
+			setBugCreating(false);
+		}
 	}
 
 	async function copyTreeNodePath(node: TreeNode) {
@@ -3433,6 +3652,82 @@ export function RemoteMachineView() {
 											placeholder="32 字节 Base64 密钥"
 											value={dbSecretKey}
 											onChange={(e) => setDbSecretKey(e.target.value)}
+											autoComplete="off"
+										/>
+									</div>
+
+									{/* Terraforge API */}
+									<div className="my-0.5 h-px bg-white/[0.06]" />
+									<div className="text-[10px] font-medium uppercase tracking-wider text-white/30">Terraforge API</div>
+									<div className="space-y-1">
+										<label className="text-[11px] text-white/45">API 地址</label>
+										<input
+											className={fieldCls}
+											type="url"
+											placeholder="https://api.terraforge.io"
+											value={bugApiUrl}
+											onChange={(e) => setBugApiUrl(e.target.value)}
+											autoComplete="off"
+										/>
+									</div>
+									<div className="space-y-1">
+										<label className="text-[11px] text-white/45">Access Key</label>
+										<input
+											className={fieldCls}
+											type="password"
+											placeholder="Terraforge Access Key…"
+											value={bugApiKey}
+											onChange={(e) => setBugApiKey(e.target.value)}
+											autoComplete="off"
+										/>
+									</div>
+									<div className="space-y-1">
+										<label className="text-[11px] text-white/45">Area</label>
+										<input
+											className={fieldCls}
+											placeholder="PatchMyPC.Engineering\Test"
+											value={bugArea}
+											onChange={(e) => setBugArea(e.target.value)}
+											autoComplete="off"
+										/>
+									</div>
+									<div className="space-y-1">
+										<label className="text-[11px] text-white/45">Iteration</label>
+										<input
+											className={fieldCls}
+											placeholder="2026\2607"
+											value={bugIteration}
+											onChange={(e) => setBugIteration(e.target.value)}
+											autoComplete="off"
+										/>
+									</div>
+									<div className="space-y-1">
+										<label className="text-[11px] text-white/45">Sprint Team</label>
+										<input
+											className={fieldCls}
+											placeholder="Terraforge Team"
+											value={bugSprintTeam}
+											onChange={(e) => setBugSprintTeam(e.target.value)}
+											autoComplete="off"
+										/>
+									</div>
+									<div className="space-y-1">
+										<label className="text-[11px] text-white/45">Source</label>
+										<input
+											className={fieldCls}
+											placeholder="Customer"
+											value={bugSource}
+											onChange={(e) => setBugSource(e.target.value)}
+											autoComplete="off"
+										/>
+									</div>
+									<div className="space-y-1">
+										<label className="text-[11px] text-white/45">Issue Type</label>
+										<input
+											className={fieldCls}
+											placeholder="Code defect"
+											value={bugIssueType}
+											onChange={(e) => setBugIssueType(e.target.value)}
 											autoComplete="off"
 										/>
 									</div>
@@ -4593,35 +4888,41 @@ export function RemoteMachineView() {
 										)}
 
 										{/* 查看区 / 编辑区 */}
-										{loadingFile ? (
-											<div className="flex flex-1 items-center justify-center gap-2 text-sm text-white/30">
-												<svg
-													className="h-4 w-4 animate-spin"
-													viewBox="0 0 24 24"
-													fill="none"
-													stroke="currentColor"
-													strokeWidth="2"
-												>
-													<path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4" />
-												</svg>
-												加载中…
-											</div>
-										) : isEditing ? (
-											<textarea
-												className="remote-file-scrollbar min-h-0 flex-1 resize-none overflow-y-auto bg-transparent px-5 py-4
+										<div
+											className="min-h-0 flex-1 flex flex-col overflow-hidden"
+											onContextMenu={handleContentContextMenu}
+										>
+											{loadingFile ? (
+												<div className="flex flex-1 items-center justify-center gap-2 text-sm text-white/30">
+													<svg
+														className="h-4 w-4 animate-spin"
+														viewBox="0 0 24 24"
+														fill="none"
+														stroke="currentColor"
+														strokeWidth="2"
+													>
+														<path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4" />
+													</svg>
+													加载中…
+												</div>
+											) : isEditing ? (
+												<textarea
+													ref={fileEditorTextareaRef}
+													className="remote-file-scrollbar min-h-0 flex-1 resize-none overflow-y-auto bg-transparent px-5 py-4
                     font-mono text-[13px] leading-relaxed text-white/80
                     placeholder:text-white/20 focus:outline-none"
-												spellCheck={false}
-												value={editorDraft}
-												onChange={(e) => handleDraftChange(e.target.value)}
-												placeholder="选择文件后显示内容…"
-												autoFocus
-											/>
-										) : useLogViewer ? (
-											<CmTraceLogContent searchQuery={textSearchQuery} searchResult={textSearchResult} />
-										) : (
-											<HighlightedContent searchQuery={textSearchQuery} searchResult={textSearchResult} />
-										)}
+													spellCheck={false}
+													value={editorDraft}
+													onChange={(e) => handleDraftChange(e.target.value)}
+													placeholder="选择文件后显示内容…"
+													autoFocus
+												/>
+											) : useLogViewer ? (
+												<CmTraceLogContent searchQuery={textSearchQuery} searchResult={textSearchResult} />
+											) : (
+												<HighlightedContent searchQuery={textSearchQuery} searchResult={textSearchResult} />
+											)}
+										</div>
 									</motion.div>
 								) : (
 									<motion.div
@@ -4697,6 +4998,285 @@ export function RemoteMachineView() {
 							</svg>
 							在 Terminal 中打开
 						</button>
+					</div>,
+					document.body,
+				)}
+
+			{/* 文件内容区右键菜单 */}
+			{contentContextMenu !== null &&
+				createPortal(
+					<div
+						data-content-context-menu
+						className="glass app-popover fixed z-[9999] min-w-[148px] overflow-hidden rounded-xl py-1 text-[12px]"
+						style={{ left: contentContextMenu.x, top: contentContextMenu.y }}
+					>
+						<button
+							type="button"
+							onClick={() => void handleContentCopy()}
+							disabled={!contentContextMenu.selectedText}
+							className="context-menu-item flex w-full items-center gap-2 px-3 py-2 text-left text-white/65 transition-colors hover:text-white/85 disabled:cursor-not-allowed disabled:opacity-35"
+						>
+							<Icon name="copy" className="h-3.5 w-3.5" aria-hidden="true" />
+							复制
+						</button>
+						<button
+							type="button"
+							onClick={() => void handleContentPaste()}
+							disabled={!isEditing}
+							className="context-menu-item flex w-full items-center gap-2 px-3 py-2 text-left text-white/65 transition-colors hover:text-white/85 disabled:cursor-not-allowed disabled:opacity-35"
+						>
+							<svg
+								viewBox="0 0 24 24"
+								className="h-3.5 w-3.5"
+								fill="none"
+								stroke="currentColor"
+								strokeWidth="1.75"
+								strokeLinecap="round"
+								strokeLinejoin="round"
+							>
+								<rect x="8" y="2" width="8" height="4" rx="1" ry="1" />
+								<path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2" />
+								<path d="M12 11v6" />
+								<path d="M9 14h6" />
+							</svg>
+							粘贴
+						</button>
+						<div className="my-1 border-t border-white/[0.06]" />
+						<button
+							type="button"
+							onClick={() => void handleOpenBugModal()}
+							className="context-menu-item flex w-full items-center gap-2 px-3 py-2 text-left text-white/65 transition-colors hover:text-white/85"
+						>
+							<svg
+								viewBox="0 0 24 24"
+								className="h-3.5 w-3.5"
+								fill="none"
+								stroke="currentColor"
+								strokeWidth="1.75"
+								strokeLinecap="round"
+								strokeLinejoin="round"
+							>
+								<circle cx="12" cy="13" r="4" />
+								<path d="M12 9V3" />
+								<path d="m8 11-4-3" />
+								<path d="m16 11 4-3" />
+								<path d="M8 21 5 19" />
+								<path d="m16 21 3-2" />
+								<path d="M8 16H4" />
+								<path d="M20 16h-4" />
+							</svg>
+							Create Bug
+						</button>
+					</div>,
+					document.body,
+				)}
+
+			{/* Create Bug 报告弹窗 */}
+			{bugModal !== null &&
+				createPortal(
+					<div
+						className="fixed inset-0 z-[10000] flex items-center justify-center bg-black/55 px-4 backdrop-blur-sm"
+						onMouseDown={() => setBugModal(null)}
+					>
+						<div
+							className="glass app-popover relative flex w-full max-w-[560px] max-h-[88vh] flex-col overflow-hidden shadow-2xl rounded-2xl"
+							onMouseDown={(e) => e.stopPropagation()}
+						>
+							{/* Header */}
+							<div className="flex shrink-0 items-center justify-between border-b border-white/[0.06] px-5 py-3.5">
+								<div className="flex min-w-0 flex-col gap-0.5">
+									<span className="text-[13px] font-medium text-white/85">Create Bug Report</span>
+									{bugCreatorUpn && <span className="text-[10px] text-white/35">Creating as: {bugCreatorUpn}</span>}
+								</div>
+								<button
+									type="button"
+									onClick={() => setBugModal(null)}
+									className="flex h-6 w-6 items-center justify-center rounded-lg text-white/40 transition-colors hover:bg-white/[0.06] hover:text-white/70"
+								>
+									<Icon name="x" className="h-3.5 w-3.5" aria-hidden="true" />
+								</button>
+							</div>
+
+							{/* Description 预览 */}
+							<div className="remote-file-scrollbar min-h-0 flex-1 overflow-y-auto px-5 py-4">
+								<pre className="whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-white/70">
+									{buildBugDescription(bugModal, bugNotes)}
+								</pre>
+							</div>
+							{/* 表单区 */}
+							<div className="shrink-0 space-y-2.5 border-t border-white/[0.06] px-5 py-3">
+								{/* 备注 */}
+								<div>
+									<label className="mb-1 block text-[11px] text-white/40">备注（可选）</label>
+									<textarea
+										value={bugNotes}
+										onChange={(e) => setBugNotes(e.target.value)}
+										placeholder="添加额外说明…"
+										className="remote-file-scrollbar w-full resize-none rounded-lg bg-white/[0.04] px-3 py-1.5 text-[12px] text-white/70 placeholder:text-white/25 ring-1 ring-white/[0.07] focus:outline-none focus:ring-white/[0.18]"
+										rows={2}
+									/>
+								</div>
+								{/* 标题 */}
+								<div>
+									<label className="mb-1 block text-[11px] text-white/40">
+										标题 <span className="text-rose-400/80">*</span>
+									</label>
+									<input
+										type="text"
+										value={bugTitle}
+										onChange={(e) => setBugTitle(e.target.value)}
+										placeholder="Bug 标题…"
+										className="w-full rounded-lg bg-white/[0.04] px-3 py-1.5 text-[12px] text-white/75 placeholder:text-white/25 ring-1 ring-white/[0.07] focus:outline-none focus:ring-white/[0.18]"
+									/>
+								</div>
+								{/* 优先级 + API 地址 */}
+								<div className="flex gap-2">
+									<div className="w-32 shrink-0">
+										<label className="mb-1 block text-[11px] text-white/40">优先级</label>
+										<select
+											value={bugPriority}
+											onChange={(e) => setBugPriority(e.target.value as 'Critical' | 'High' | 'Medium' | 'Low')}
+											className="w-full rounded-lg bg-white/[0.04] px-3 py-1.5 text-[12px] text-white/75 ring-1 ring-white/[0.07] focus:outline-none focus:ring-white/[0.18]"
+										>
+											<option value="Critical">Critical</option>
+											<option value="High">High</option>
+											<option value="Medium">Medium</option>
+											<option value="Low">Low</option>
+										</select>
+									</div>
+									<div className="flex-1">
+										<label className="mb-1 block text-[11px] text-white/40">
+											API 地址 <span className="text-rose-400/80">*</span>
+										</label>
+										<input
+											type="url"
+											value={bugApiUrl}
+											onChange={(e) => setBugApiUrl(e.target.value)}
+											placeholder="https://api.terraforge.io"
+											className="w-full rounded-lg bg-white/[0.04] px-3 py-1.5 text-[12px] text-white/75 placeholder:text-white/25 ring-1 ring-white/[0.07] focus:outline-none focus:ring-white/[0.18]"
+										/>
+									</div>
+								</div>
+								{/* Access Key */}
+								<div>
+									<label className="mb-1 block text-[11px] text-white/40">
+										Access Key <span className="text-rose-400/80">*</span>
+									</label>
+									<input
+										type="password"
+										value={bugApiKey}
+										onChange={(e) => setBugApiKey(e.target.value)}
+										placeholder="Terraforge API access key…"
+										className="w-full rounded-lg bg-white/[0.04] px-3 py-1.5 text-[12px] text-white/75 placeholder:text-white/25 ring-1 ring-white/[0.07] focus:outline-none focus:ring-white/[0.18]"
+									/>
+								</div>
+								{/* Area + Iteration */}
+								<div className="flex gap-2">
+									<div className="flex-1">
+										<label className="mb-1 block text-[11px] text-white/40">Area</label>
+										<input
+											type="text"
+											value={bugArea}
+											onChange={(e) => setBugArea(e.target.value)}
+											placeholder="e.g. PatchMyPC.Engineering\Test"
+											className="w-full rounded-lg bg-white/[0.04] px-3 py-1.5 text-[12px] text-white/75 placeholder:text-white/25 ring-1 ring-white/[0.07] focus:outline-none focus:ring-white/[0.18]"
+										/>
+									</div>
+									<div className="flex-1">
+										<label className="mb-1 block text-[11px] text-white/40">Iteration</label>
+										<input
+											type="text"
+											value={bugIteration}
+											onChange={(e) => setBugIteration(e.target.value)}
+											placeholder="e.g. 2026\2607"
+											className="w-full rounded-lg bg-white/[0.04] px-3 py-1.5 text-[12px] text-white/75 placeholder:text-white/25 ring-1 ring-white/[0.07] focus:outline-none focus:ring-white/[0.18]"
+										/>
+									</div>
+								</div>
+								{/* Sprint Team + Source + Issue Type */}
+								<div className="flex gap-2">
+									<div className="flex-1">
+										<label className="mb-1 block text-[11px] text-white/40">Sprint Team</label>
+										<input
+											type="text"
+											value={bugSprintTeam}
+											onChange={(e) => setBugSprintTeam(e.target.value)}
+											placeholder="e.g. Terraforge Team"
+											className="w-full rounded-lg bg-white/[0.04] px-3 py-1.5 text-[12px] text-white/75 placeholder:text-white/25 ring-1 ring-white/[0.07] focus:outline-none focus:ring-white/[0.18]"
+										/>
+									</div>
+									<div className="w-28 shrink-0">
+										<label className="mb-1 block text-[11px] text-white/40">Source</label>
+										<input
+											type="text"
+											value={bugSource}
+											onChange={(e) => setBugSource(e.target.value)}
+											placeholder="e.g. Customer"
+											className="w-full rounded-lg bg-white/[0.04] px-3 py-1.5 text-[12px] text-white/75 placeholder:text-white/25 ring-1 ring-white/[0.07] focus:outline-none focus:ring-white/[0.18]"
+										/>
+									</div>
+									<div className="w-28 shrink-0">
+										<label className="mb-1 block text-[11px] text-white/40">Issue Type</label>
+										<input
+											type="text"
+											value={bugIssueType}
+											onChange={(e) => setBugIssueType(e.target.value)}
+											placeholder="e.g. Code defect"
+											className="w-full rounded-lg bg-white/[0.04] px-3 py-1.5 text-[12px] text-white/75 placeholder:text-white/25 ring-1 ring-white/[0.07] focus:outline-none focus:ring-white/[0.18]"
+										/>
+									</div>
+								</div>
+							</div>
+
+							{/* Footer */}
+							<div className="flex shrink-0 items-center justify-between border-t border-white/[0.06] px-5 py-3">
+								<div className="mr-3 min-w-0 flex-1 text-[12px]">
+									{bugCreateResult ? (
+										<a
+											href={bugCreateResult.url}
+											target="_blank"
+											rel="noreferrer"
+											className="inline-flex items-center gap-1.5 truncate text-emerald-400 hover:text-emerald-300"
+										>
+											<Icon name="check" className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />#{bugCreateResult.id} —
+											Open in Azure DevOps ↗
+										</a>
+									) : bugCreateError ? (
+										<span className="text-rose-400" title={bugCreateError}>
+											{bugCreateError}
+										</span>
+									) : null}
+								</div>
+								<div className="flex shrink-0 items-center gap-2">
+									<button
+										type="button"
+										onClick={() => setBugModal(null)}
+										className="rounded-lg px-3 py-1.5 text-[12px] text-white/45 transition-colors hover:text-white/70"
+									>
+										关闭
+									</button>
+									<button
+										type="button"
+										onClick={() => void handleCreateBugReport()}
+										disabled={bugCreating || !bugTitle.trim() || !bugApiUrl.trim() || !bugApiKey.trim()}
+										className="flex items-center gap-1.5 rounded-lg px-3.5 py-1.5 text-[12px] font-medium text-white/80 transition-all disabled:cursor-not-allowed disabled:opacity-40"
+										style={{
+											background: 'rgb(var(--accent-rgb) / 0.14)',
+											border: '1px solid rgb(var(--accent-rgb) / 0.3)',
+										}}
+									>
+										{bugCreating ? (
+											<>
+												<Icon name="loader" className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+												创建中…
+											</>
+										) : (
+											'Create'
+										)}
+									</button>
+								</div>
+							</div>
+						</div>
 					</div>,
 					document.body,
 				)}

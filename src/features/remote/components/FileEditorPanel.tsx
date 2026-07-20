@@ -1,12 +1,23 @@
 'use client';
 
-import React from 'react';
+import React, { useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { AnimatePresence, motion } from 'framer-motion';
 import type { ContentSearchResult } from '../domain/types';
 import { PROBLEM_CONTEXT_LINES } from '../domain/logFilter';
 import { sftpToDisplay } from '../domain/pathUtils';
 import { CmTraceLogContent, FileContentCopyButton, HighlightedContent } from './FileViewer';
 import { Icon } from '@/components/ui/Icon';
+
+interface ContentContextMenu {
+	x: number;
+	y: number;
+	selectedText: string;
+}
+
+interface BugReportModal {
+	selectedText: string;
+}
 
 interface FileEditorPanelProps {
 	activeConnectionId: string | null;
@@ -57,6 +68,102 @@ export function FileEditorPanel({
 	onClearSearch,
 	onToggleFilter,
 }: FileEditorPanelProps) {
+	const [contextMenu, setContextMenu] = useState<ContentContextMenu | null>(null);
+	const [bugModal, setBugModal] = useState<BugReportModal | null>(null);
+	const [bugNotes, setBugNotes] = useState('');
+	const [bugCopied, setBugCopied] = useState(false);
+	const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+	useEffect(() => {
+		if (!contextMenu) return;
+		const closeMenu = () => setContextMenu(null);
+		const onMouseDown = (e: MouseEvent) => {
+			const target = e.target as HTMLElement;
+			if (target.closest('[data-content-context-menu]')) return;
+			closeMenu();
+		};
+		window.addEventListener('mousedown', onMouseDown);
+		window.addEventListener('contextmenu', closeMenu);
+		window.addEventListener('resize', closeMenu);
+		window.addEventListener('scroll', closeMenu, true);
+		return () => {
+			window.removeEventListener('mousedown', onMouseDown);
+			window.removeEventListener('contextmenu', closeMenu);
+			window.removeEventListener('resize', closeMenu);
+			window.removeEventListener('scroll', closeMenu, true);
+		};
+	}, [contextMenu]);
+
+	function handleContentContextMenu(e: React.MouseEvent) {
+		e.preventDefault();
+		const selectedText = window.getSelection()?.toString() ?? '';
+		setContextMenu({ x: e.clientX, y: e.clientY, selectedText });
+	}
+
+	async function handleCopy() {
+		if (contextMenu?.selectedText) {
+			try {
+				await navigator.clipboard.writeText(contextMenu.selectedText);
+			} catch {
+				/* ignore */
+			}
+		}
+		setContextMenu(null);
+	}
+
+	async function handlePaste() {
+		if (!isEditing) {
+			setContextMenu(null);
+			return;
+		}
+		try {
+			const text = await navigator.clipboard.readText();
+			const textarea = textareaRef.current;
+			if (textarea && text) {
+				const start = textarea.selectionStart ?? 0;
+				const end = textarea.selectionEnd ?? 0;
+				const newVal = editorDraft.slice(0, start) + text + editorDraft.slice(end);
+				onDraftChange(newVal);
+				requestAnimationFrame(() => {
+					textarea.selectionStart = start + text.length;
+					textarea.selectionEnd = start + text.length;
+					textarea.focus();
+				});
+			}
+		} catch {
+			/* clipboard read failed */
+		}
+		setContextMenu(null);
+	}
+
+	function handleCreateBug() {
+		setBugNotes('');
+		setBugCopied(false);
+		setBugModal({ selectedText: contextMenu?.selectedText ?? '' });
+		setContextMenu(null);
+	}
+
+	async function handleCopyBugReport() {
+		const timestamp = new Date().toLocaleString('zh-CN');
+		const lines: string[] = [
+			'[Bug Report]',
+			`文件: ${sftpToDisplay(selectedFile ?? '')}`,
+			`机器: ${activeConnectionLabel ?? ''}`,
+			`时间: ${timestamp}`,
+			'',
+			'日志内容:',
+			bugModal?.selectedText ?? '',
+		];
+		if (bugNotes) lines.push('', '备注:', bugNotes);
+		try {
+			await navigator.clipboard.writeText(lines.join('\n'));
+			setBugCopied(true);
+			setTimeout(() => setBugCopied(false), 2000);
+		} catch {
+			/* ignore */
+		}
+	}
+
 	return (
 		<div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
 			<AnimatePresence mode="wait">
@@ -117,10 +224,7 @@ export function FileEditorPanel({
 								{isEditing ? '🔒 退出编辑' : '✏️ 编辑'}
 							</button>
 
-							<FileContentCopyButton
-								content={editorDraft}
-								disabled={loadingFile || fileReadError}
-							/>
+							<FileContentCopyButton content={editorDraft} disabled={loadingFile || fileReadError} />
 
 							{isEditing && !fileReadError && (
 								<button
@@ -211,31 +315,28 @@ export function FileEditorPanel({
 						)}
 
 						{/* Content area */}
-						{loadingFile ? (
-							<div className="flex flex-1 items-center justify-center gap-2 text-sm text-white/30">
-								<Icon name="loader" className="h-4 w-4 animate-spin" aria-hidden="true" />
-								加载中…
-							</div>
-						) : isEditing ? (
-							<textarea
-								className="remote-file-scrollbar min-h-0 flex-1 resize-none overflow-y-auto bg-transparent px-5 py-4 font-mono text-[13px] leading-relaxed text-white/80 placeholder:text-white/20 focus:outline-none"
-								spellCheck={false}
-								value={editorDraft}
-								onChange={(e) => onDraftChange(e.target.value)}
-								placeholder="选择文件后显示内容…"
-								autoFocus
-							/>
-						) : useLogViewer ? (
-							<CmTraceLogContent
-								searchQuery={textSearchQuery}
-								searchResult={textSearchResult}
-							/>
-						) : (
-							<HighlightedContent
-								searchQuery={textSearchQuery}
-								searchResult={textSearchResult}
-							/>
-						)}
+						<div className="min-h-0 flex-1 flex flex-col overflow-hidden" onContextMenu={handleContentContextMenu}>
+							{loadingFile ? (
+								<div className="flex flex-1 items-center justify-center gap-2 text-sm text-white/30">
+									<Icon name="loader" className="h-4 w-4 animate-spin" aria-hidden="true" />
+									加载中…
+								</div>
+							) : isEditing ? (
+								<textarea
+									ref={textareaRef}
+									className="remote-file-scrollbar min-h-0 flex-1 resize-none overflow-y-auto bg-transparent px-5 py-4 font-mono text-[13px] leading-relaxed text-white/80 placeholder:text-white/20 focus:outline-none"
+									spellCheck={false}
+									value={editorDraft}
+									onChange={(e) => onDraftChange(e.target.value)}
+									placeholder="选择文件后显示内容…"
+									autoFocus
+								/>
+							) : useLogViewer ? (
+								<CmTraceLogContent searchQuery={textSearchQuery} searchResult={textSearchResult} />
+							) : (
+								<HighlightedContent searchQuery={textSearchQuery} searchResult={textSearchResult} />
+							)}
+						</div>
 					</motion.div>
 				) : (
 					<motion.div
@@ -258,14 +359,171 @@ export function FileEditorPanel({
 							<line x1="16" y1="17" x2="8" y2="17" />
 							<polyline points="10 9 9 9 8 9" />
 						</svg>
-						<span className="text-sm">
-							{activeConnectionLabel
-								? '← 在左侧选择一个文件'
-								: '请先连接或选择远程机器'}
-						</span>
+						<span className="text-sm">{activeConnectionLabel ? '← 在左侧选择一个文件' : '请先连接或选择远程机器'}</span>
 					</motion.div>
 				)}
 			</AnimatePresence>
+
+			{/* Content area right-click context menu */}
+			{typeof window !== 'undefined' &&
+				contextMenu !== null &&
+				createPortal(
+					<div
+						data-content-context-menu
+						className="glass app-popover fixed z-[9999] min-w-[148px] overflow-hidden rounded-xl py-1 text-[12px]"
+						style={{ left: contextMenu.x, top: contextMenu.y }}
+					>
+						<button
+							type="button"
+							onClick={() => void handleCopy()}
+							disabled={!contextMenu.selectedText}
+							className="context-menu-item flex w-full items-center gap-2 px-3 py-2 text-left text-white/65 transition-colors hover:text-white/85 disabled:cursor-not-allowed disabled:opacity-35"
+						>
+							<Icon name="copy" className="h-3.5 w-3.5" aria-hidden="true" />
+							复制
+						</button>
+						<button
+							type="button"
+							onClick={() => void handlePaste()}
+							disabled={!isEditing}
+							className="context-menu-item flex w-full items-center gap-2 px-3 py-2 text-left text-white/65 transition-colors hover:text-white/85 disabled:cursor-not-allowed disabled:opacity-35"
+						>
+							<svg
+								viewBox="0 0 24 24"
+								className="h-3.5 w-3.5"
+								fill="none"
+								stroke="currentColor"
+								strokeWidth="1.75"
+								strokeLinecap="round"
+								strokeLinejoin="round"
+							>
+								<rect x="8" y="2" width="8" height="4" rx="1" ry="1" />
+								<path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2" />
+								<path d="M12 11v6" />
+								<path d="M9 14h6" />
+							</svg>
+							粘贴
+						</button>
+						<div className="my-1 border-t border-white/[0.06]" />
+						<button
+							type="button"
+							onClick={handleCreateBug}
+							className="context-menu-item flex w-full items-center gap-2 px-3 py-2 text-left text-white/65 transition-colors hover:text-white/85"
+						>
+							<svg
+								viewBox="0 0 24 24"
+								className="h-3.5 w-3.5"
+								fill="none"
+								stroke="currentColor"
+								strokeWidth="1.75"
+								strokeLinecap="round"
+								strokeLinejoin="round"
+							>
+								<circle cx="12" cy="13" r="4" />
+								<path d="M12 9V3" />
+								<path d="m8 11-4-3" />
+								<path d="m16 11 4-3" />
+								<path d="M8 21 5 19" />
+								<path d="m16 21 3-2" />
+								<path d="M8 16H4" />
+								<path d="M20 16h-4" />
+							</svg>
+							Create Bug
+						</button>
+					</div>,
+					document.body,
+				)}
+
+			{/* Create Bug modal */}
+			{typeof window !== 'undefined' &&
+				bugModal !== null &&
+				createPortal(
+					<div
+						className="fixed inset-0 z-[10000] flex items-center justify-center bg-black/55 px-4 backdrop-blur-sm"
+						onMouseDown={() => setBugModal(null)}
+					>
+						<div
+							className="glass app-popover relative flex w-full max-w-[560px] max-h-[80vh] flex-col overflow-hidden shadow-2xl rounded-2xl"
+							onMouseDown={(e) => e.stopPropagation()}
+						>
+							{/* Header */}
+							<div className="flex items-center justify-between border-b border-white/[0.06] px-5 py-3.5">
+								<span className="text-[13px] font-medium text-white/85">Create Bug Report</span>
+								<button
+									type="button"
+									onClick={() => setBugModal(null)}
+									className="flex h-6 w-6 items-center justify-center rounded-lg text-white/40 transition-colors hover:bg-white/[0.06] hover:text-white/70"
+								>
+									<Icon name="x" className="h-3.5 w-3.5" aria-hidden="true" />
+								</button>
+							</div>
+
+							{/* Body */}
+							<div className="flex-1 overflow-y-auto px-5 py-4 space-y-3">
+								<div>
+									<label className="text-[11px] text-white/45 mb-1 block">文件</label>
+									<div className="rounded-lg bg-white/[0.04] px-3 py-1.5 font-mono text-[12px] text-white/55 truncate">
+										{sftpToDisplay(selectedFile ?? '')}
+									</div>
+								</div>
+								{activeConnectionLabel && (
+									<div>
+										<label className="text-[11px] text-white/45 mb-1 block">机器</label>
+										<div className="rounded-lg bg-white/[0.04] px-3 py-1.5 text-[12px] text-white/55">
+											{activeConnectionLabel}
+										</div>
+									</div>
+								)}
+								<div>
+									<label className="text-[11px] text-white/45 mb-1 block">
+										日志内容{!bugModal.selectedText && <span className="ml-1 text-white/30">（未选中文本）</span>}
+									</label>
+									<textarea
+										readOnly
+										value={bugModal.selectedText}
+										placeholder="未选中任何内容"
+										className="remote-file-scrollbar w-full rounded-lg bg-white/[0.04] px-3 py-2 font-mono text-[12px] text-white/65 placeholder:text-white/25 focus:outline-none resize-none"
+										rows={6}
+									/>
+								</div>
+								<div>
+									<label className="text-[11px] text-white/45 mb-1 block">备注</label>
+									<textarea
+										value={bugNotes}
+										onChange={(e) => setBugNotes(e.target.value)}
+										placeholder="添加额外说明…"
+										className="remote-file-scrollbar w-full rounded-lg bg-white/[0.04] px-3 py-2 text-[12px] text-white/65 placeholder:text-white/25 focus:outline-none resize-none focus:ring-1 focus:ring-white/[0.12]"
+										rows={3}
+									/>
+								</div>
+							</div>
+
+							{/* Footer */}
+							<div className="flex items-center justify-end gap-2 border-t border-white/[0.06] px-5 py-3">
+								<button
+									type="button"
+									onClick={() => setBugModal(null)}
+									className="rounded-lg px-3 py-1.5 text-[12px] text-white/45 transition-colors hover:text-white/70"
+								>
+									关闭
+								</button>
+								<button
+									type="button"
+									onClick={() => void handleCopyBugReport()}
+									className="flex items-center gap-1.5 rounded-lg px-3.5 py-1.5 text-[12px] font-medium text-white/80 transition-all"
+									style={{
+										background: 'rgb(var(--accent-rgb) / 0.14)',
+										border: '1px solid rgb(var(--accent-rgb) / 0.3)',
+									}}
+								>
+									<Icon name={bugCopied ? 'check' : 'copy'} className="h-3.5 w-3.5" aria-hidden="true" />
+									{bugCopied ? '已复制' : '复制报告'}
+								</button>
+							</div>
+						</div>
+					</div>,
+					document.body,
+				)}
 		</div>
 	);
 }

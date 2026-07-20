@@ -169,3 +169,149 @@ fn delete_provider_impl(pool: &Pool, id: &str) -> AppResult<()> {
     conn.exec_drop("DELETE FROM model_providers WHERE id = ?", (id,))?;
     Ok(())
 }
+
+// ── Azure CLI helper ──────────────────────────────────────────────────────
+
+/// 运行 `az account show --output json` 并返回原始 JSON 字符串。
+/// 若 az 未安装或未登录则返回 Err。
+/// Windows 上 az 是 az.cmd，需通过 cmd /c 调用，否则 PATH 解析失败。
+#[tauri::command]
+pub async fn run_az_account_show() -> Result<String, String> {
+    use std::process::Command;
+
+    #[cfg(target_os = "windows")]
+    let output = Command::new("cmd")
+        .args(["/c", "az", "account", "show", "--output", "json"])
+        .output()
+        .map_err(|e| format!("无法运行 az 命令: {e}"))?;
+
+    #[cfg(not(target_os = "windows"))]
+    let output = Command::new("az")
+        .args(["account", "show", "--output", "json"])
+        .output()
+        .map_err(|e| format!("无法运行 az 命令: {e}"))?;
+
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        Err(if !stderr.is_empty() {
+            stderr
+        } else if !stdout.is_empty() {
+            stdout
+        } else {
+            format!("az 命令退出码: {}", output.status.code().unwrap_or(-1))
+        })
+    }
+}
+
+// ── Terraforge Work Item ──────────────────────────────────────────────────
+
+#[derive(serde::Deserialize)]
+pub struct CreateWorkItemParams {
+    pub base_url: String,
+    pub access_key: String,
+    pub title: String,
+    pub description: String,
+    pub priority: String,
+    // Optional fields
+    pub area: Option<String>,
+    pub iteration: Option<String>,
+    pub source: Option<String>,
+    pub issue_type: Option<String>,
+    pub sprint_team: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+pub struct CreateWorkItemResult {
+    pub id: i64,
+    pub url: String,
+}
+
+/// 在 Rust 侧执行 Terraforge 两步 API（GetToken → CreateWorkItem），
+/// 绕过 WebView CORS 限制。
+#[tauri::command]
+pub async fn create_work_item(params: CreateWorkItemParams) -> Result<CreateWorkItemResult, String> {
+    let client = reqwest::Client::new();
+    let base_url = params.base_url.trim().trim_end_matches('/');
+
+    // Step 1: 获取 JWT Token
+    let token_res = client
+        .post(format!("{}/auth/token", base_url))
+        .header("Accept", "application/json")
+        .header("X-Client-Type", "Automated")
+        .json(&serde_json::json!({ "accessKey": params.access_key }))
+        .send()
+        .await
+        .map_err(|e| format!("认证请求失败: {e}"))?;
+
+    if !token_res.status().is_success() {
+        let status = token_res.status().as_u16();
+        let body: serde_json::Value = token_res.json().await.unwrap_or_default();
+        let msg = body["message"].as_str().unwrap_or("认证失败").to_string();
+        return Err(format!("{msg} ({status})"));
+    }
+
+    let token_data: serde_json::Value = token_res
+        .json()
+        .await
+        .map_err(|e| format!("解析 Token 响应失败: {e}"))?;
+
+    let access_token = token_data["data"]["accessToken"]
+        .as_str()
+        .ok_or_else(|| "Token 响应中缺少 accessToken".to_string())?
+        .to_string();
+
+    // Step 2: 创建 Work Item（multipart/form-data，字段名大写匹配 API 规范）
+    let mut form = reqwest::multipart::Form::new()
+        .text("Title", params.title)
+        .text("Description", params.description)
+        .text("Priority", params.priority);
+
+    // 追加非空可选字段
+    for (name, val) in [
+        ("Area",       params.area),
+        ("Iteration",  params.iteration),
+        ("Source",     params.source),
+        ("IssueType",  params.issue_type),
+        ("SprintTeam", params.sprint_team),
+    ] {
+        if let Some(v) = val {
+            let v = v.trim().to_string();
+            if !v.is_empty() {
+                form = form.text(name, v);
+            }
+        }
+    }
+
+    let create_res = client
+        .post(format!("{}/v1/azuredevops/WorkItems", base_url))
+        .bearer_auth(&access_token)
+        .header("Accept", "application/json")
+        .header("X-Client-Type", "Automated")
+        .multipart(form)
+        .send()
+        .await
+        .map_err(|e| format!("创建 Work Item 失败: {e}"))?;
+
+    if !create_res.status().is_success() {
+        let status = create_res.status().as_u16();
+        let body: serde_json::Value = create_res.json().await.unwrap_or_default();
+        let msg = body["message"].as_str().unwrap_or("创建失败").to_string();
+        return Err(format!("{msg} ({status})"));
+    }
+
+    let create_data: serde_json::Value = create_res
+        .json()
+        .await
+        .map_err(|e| format!("解析创建响应失败: {e}"))?;
+
+    Ok(CreateWorkItemResult {
+        id: create_data["data"]["id"].as_i64().unwrap_or(0),
+        url: create_data["data"]["url"]
+            .as_str()
+            .unwrap_or("")
+            .to_string(),
+    })
+}
