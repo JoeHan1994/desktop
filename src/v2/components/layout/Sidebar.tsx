@@ -47,29 +47,6 @@ export function Sidebar({ active, onNavigate }: SidebarProps) {
 			))}
 
 			<div className="v2-sidebar__spacer" />
-
-			<div className="v2-surface-block v2-stack-2">
-				<span className="v2-eyebrow">存储用量</span>
-				<div
-					style={{
-						height: 6,
-						borderRadius: 'var(--v2-radius-full)',
-						background: 'var(--v2-surface-3)',
-						overflow: 'hidden',
-					}}
-				>
-					<div
-						style={{
-							width: '64%',
-							height: '100%',
-							background: 'linear-gradient(90deg, var(--v2-brand-400), var(--v2-brand-600))',
-						}}
-					/>
-				</div>
-				<span className="v2-text-subtle" style={{ fontSize: 'var(--v2-text-xs)' }}>
-					6.4 / 10 GB 已使用
-				</span>
-			</div>
 		</aside>
 	);
 }

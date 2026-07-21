@@ -2,6 +2,8 @@
 
 import '../styles/globals.css';
 import { V2ThemeProvider, useV2Theme } from '../features/theme/ThemeContext';
+import { ModelProvidersProvider } from '../features/models/ModelProvidersContext';
+import { ToastProvider } from '../components/ui/Toast';
 import { AppShell } from '../components/layout/AppShell';
 
 /** 应用 data-v2-theme 的根容器，作用域限定在 .v2-root 子树内。 */
@@ -21,8 +23,12 @@ function V2Surface() {
  */
 export function V2App() {
 	return (
-		<V2ThemeProvider defaultTheme="dark">
-			<V2Surface />
+		<V2ThemeProvider defaultTheme="light">
+			<ToastProvider>
+				<ModelProvidersProvider>
+					<V2Surface />
+				</ModelProvidersProvider>
+			</ToastProvider>
 		</V2ThemeProvider>
 	);
 }

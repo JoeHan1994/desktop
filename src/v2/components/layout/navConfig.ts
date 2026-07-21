@@ -1,7 +1,7 @@
 import type { ComponentType, SVGProps } from 'react';
-import { IconDashboard, IconDatabase, IconLayers, IconSettings, IconSpark } from '../ui/icons';
+import { IconDatabase, IconServer, IconSettings } from '../ui/icons';
 
-export type NavKey = 'overview' | 'pipeline' | 'knowledge' | 'assistant' | 'settings';
+export type NavKey = 'remote' | 'rag' | 'settings';
 
 export interface NavItem {
 	key: NavKey;
@@ -10,11 +10,14 @@ export interface NavItem {
 	group: string;
 }
 
-/** V2 侧边栏导航配置。 */
+/**
+ * V2 侧边栏导航配置（对应设计说明书的三大功能模块）：
+ *   remote   → Remote Machine Management（协议 / 脚本 / 证书）
+ *   rag      → RAG Knowledge Base & Chunk Visualizer
+ *   settings → System Settings（模型 / 数据库 / 系统）
+ */
 export const NAV_ITEMS: NavItem[] = [
-	{ key: 'overview', label: '概览', icon: IconDashboard, group: '工作台' },
-	{ key: 'pipeline', label: '数据管线', icon: IconLayers, group: '工作台' },
-	{ key: 'knowledge', label: '知识库', icon: IconDatabase, group: '工作台' },
-	{ key: 'assistant', label: '智能助手', icon: IconSpark, group: '系统' },
-	{ key: 'settings', label: '设置', icon: IconSettings, group: '系统' },
+	{ key: 'remote', label: '远程机器', icon: IconServer, group: '基础设施' },
+	{ key: 'rag', label: 'RAG 知识库', icon: IconDatabase, group: 'AI 引擎' },
+	{ key: 'settings', label: '系统设置', icon: IconSettings, group: '配置' },
 ];
