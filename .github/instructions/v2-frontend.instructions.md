@@ -2,15 +2,15 @@
 applyTo: "src/v2/**"
 ---
 
-# V2 Frontend Instructions — Neumorphic × Bento
+# V2 Frontend Instructions — Glassmorphism × Bento
 
 ## Scope
 
 These instructions govern the **V2 surface** under `src/v2/**` only. V2 is fully isolated
-from V1: it does **not** use the V1 glass system (`.glass`, `app-card`, `--glass-*`,
-`backdrop-blur`), and V1 must not consume V2 tokens or classes. The design language is
-**Bento Grid architecture × Neumorphic (Soft UI)** — an all-in-one developer & AI
-engineering console.
+from V1: it does **not** import any V1 asset (`.glass`, `app-card`, `--glass-*`), and V1
+must not consume V2 tokens or classes. The design language is **Bento Grid architecture ×
+Glassmorphism (frosted glass)** — an all-in-one developer & AI engineering console: a deep
+gradient backdrop showing through translucent, `backdrop-filter`-blurred surfaces.
 
 ## Stack & Structure
 
@@ -25,16 +25,19 @@ engineering console.
 
 ## Design Tokens (authoritative)
 
-All tokens are defined in `globals.css` under `.v2-root` and the two theme maps. **Light is
-the default theme**; dark is a supported neumorphic variant selected via
-`data-v2-theme="dark"` (owned by `features/theme/ThemeContext.tsx`).
+All tokens are defined in `globals.css` under `.v2-root` and the two theme maps. **Dark is
+the default theme** (deep `#0d1117` gradient); a lighter frosted variant is selected via
+`data-v2-theme="light"` (owned by `features/theme/ThemeContext.tsx`).
 
-- Surfaces share the page base color — depth comes from **directional shadow**, not fills
-  or borders. Never hard-code hex surfaces or `box-shadow` values in components.
-- Use these shadow tokens for every raised/recessed surface:
+- Surfaces are **translucent** (`--v2-surface*` = semi-transparent white) over the page
+  gradient; depth comes from **backdrop blur + drop shadow + a 1px highlight edge** baked
+  into the shadow tokens. Never hard-code hex/rgba surfaces or `box-shadow` values in
+  components, and never hard-code `backdrop-filter` — use `--v2-glass-blur`.
+- Use these shadow tokens for every raised/recessed surface (each already includes the
+  glass hairline edge via an `inset 0 0 0 1px` highlight):
   - `--v2-shadow-extruded` / `--v2-shadow-extruded-sm` — raised (buttons, cards, badges).
   - `--v2-shadow-recessed` / `--v2-shadow-recessed-sm` — inset (inputs, tracks, wells).
-  - `--v2-shadow-hover` — soft lift on hover.
+  - `--v2-shadow-hover` — brighter edge + deeper lift on hover.
 - Radii: `--v2-radius-md` (nested), `--v2-radius-lg` (panels/terminal),
   `--v2-radius-xl` (Bento cards), `--v2-radius-full` (pills/switches/meters).
 - Spacing uses the `--v2-space-*` 4px scale; the Bento gap is `--v2-space-6` (24px).
@@ -44,16 +47,20 @@ the default theme**; dark is a supported neumorphic variant selected via
   `--v2-accent-ssh` (emerald), `--v2-accent-rdp` (blue), `--v2-accent-vector` (purple),
   `--v2-accent-warn` (amber), `--v2-accent-danger` (rose), plus `--v2-primary`.
 
-## Neumorphic Rules
+## Glassmorphism Rules
 
-- A surface is either **extruded** (raised) or **recessed** (inset) — pick one per element
-  and keep it consistent with its interaction: inputs/tracks/wells are recessed; cards,
-  buttons, badges, and knobs are extruded.
+- A surface is either **extruded** (raised glass panel) or **recessed** (inset well) — pick
+  one per element and keep it consistent with its interaction: inputs/tracks/wells are
+  recessed; cards, buttons, badges, and knobs are extruded.
+- Any translucent surface that overlays the gradient must carry `backdrop-filter:
+  blur(var(--v2-glass-blur))`. Add new glass surfaces to the shared blur group near the
+  top of the Components section rather than per-component.
 - Pressed/active states invert: extruded controls adopt `*-recessed-sm` on `:active` or
   when selected (e.g. active nav item, active segmented button, active pill).
-- **No hard borders** on primary surfaces. A 1px `--v2-border` is allowed only for
-  table row dividers and hairline separators, never to outline a card.
-- Keep shadow offsets moderate so surfaces read as tactile hardware, not floating cards.
+- The glass edge (1px highlight) comes from the shadow tokens — do **not** add a separate
+  `border` to outline a card. A flat `--v2-border` is allowed only for table row dividers
+  and hairline separators.
+- Keep surfaces readable: translucent fills plus blur, never fully opaque hero panels.
 - Respect `prefers-reduced-motion` (already handled globally); do not add motion that
   bypasses it.
 

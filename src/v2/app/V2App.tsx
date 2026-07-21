@@ -23,7 +23,7 @@ function V2Surface() {
  */
 export function V2App() {
 	return (
-		<V2ThemeProvider defaultTheme="light">
+		<V2ThemeProvider defaultTheme="dark">
 			<ToastProvider>
 				<ModelProvidersProvider>
 					<V2Surface />
