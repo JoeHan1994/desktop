@@ -1,9 +1,4 @@
 import type { Metadata } from 'next';
-import './globals.css';
-import { HyperspeedBackground } from '@/components/HyperspeedBackground';
-import { ThemeProvider } from '@/features/theme/ThemeContext';
-import { ModelProvidersProvider } from '@/features/models/ModelProvidersContext';
-import { ErrorBoundary } from '@/components/ErrorBoundary';
 
 export const metadata: Metadata = {
 	title: 'MyToolBox',
@@ -55,7 +50,8 @@ const assetRecoveryScript = `
 /**
  * 全局布局。
  *
- * ThemeProvider 包裹背景与内容，驱动全站玻璃组件外观；Hyperspeed 光速隧道作为常驻背景。
+ * V2 应用 (V2App) 自带主题上下文、样式框架与全局 Provider，
+ * 此处仅提供最小化的 html/body 外壳以及资源加载的兜底与自恢复脚本。
  */
 export default function RootLayout({
 	children,
@@ -68,19 +64,7 @@ export default function RootLayout({
 				<style dangerouslySetInnerHTML={{ __html: criticalFallbackCss }} />
 				<script dangerouslySetInnerHTML={{ __html: assetRecoveryScript }} />
 			</head>
-			<body className="overflow-hidden bg-[rgb(var(--background))] text-white antialiased">
-				<ThemeProvider>
-					<ModelProvidersProvider>
-						<div className="relative flex h-screen min-h-0 flex-col bg-[rgb(var(--background))]">
-							{/* 全局 Hyperspeed 光速隧道背景 */}
-							<HyperspeedBackground />
-							<main className="relative z-10 flex-1 min-h-0 h-full overflow-hidden">
-								<ErrorBoundary>{children}</ErrorBoundary>
-							</main>
-						</div>
-					</ModelProvidersProvider>
-				</ThemeProvider>
-			</body>
+			<body>{children}</body>
 		</html>
 	);
 }
